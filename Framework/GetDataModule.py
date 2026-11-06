@@ -7,10 +7,12 @@ Nunca escreve."""
 
 import csv
 import json
+import os
 from typing import Dict, List, Optional
 
 from Framework.InitModule import BotConfig
 from Framework.RPAFrameworkException import RPAFrameworkException
+from Log.LogModule import OUTPUT_PATH, STATUS_FINALIZED
 from Utils.PortalClient import fetch_planned_trips
 
 REQUIRED_CSV_COLUMNS = ("pool", "placa")
@@ -51,8 +53,39 @@ def get_data(config: BotConfig) -> List[dict]:
                 }
             )
 
-    print(f"[OK] {len(items)} programação(ões) a registrar na Vibra.")
-    return items
+    finalized_keys = _load_finalized_keys(OUTPUT_PATH)
+    pending = [item for item in items if _item_key(item["tripId"], item["pool"]) not in finalized_keys]
+    if len(pending) < len(items):
+        print(
+            f"[INFO] {len(items) - len(pending)} programação(ões) ignorada(s): já FINALIZADA(S) na Vibra "
+            f"(histórico em {OUTPUT_PATH})."
+        )
+    print(f"[OK] {len(pending)} programação(ões) a registrar na Vibra.")
+    return pending
+
+
+def _item_key(trip_id, pool: str) -> tuple:
+    return str(trip_id).strip(), (pool or "").strip().upper()
+
+
+def _load_finalized_keys(history_path: str) -> set:
+    """Viagem + pool já finalizados em execuções anteriores. Enquanto o bot não
+    reporta ao portal (registered_at_distributor), o portal continua devolvendo a
+    viagem - sem este filtro ela seria cadastrada de novo na Vibra a cada ciclo."""
+    if not os.path.isfile(history_path):
+        return set()
+    try:
+        with open(history_path, newline="", encoding="utf-8-sig") as file:
+            return {
+                _item_key(row.get("trip_id", ""), row.get("pool", ""))
+                for row in csv.DictReader(file)
+                if row.get("status") == STATUS_FINALIZED and row.get("trip_id")
+            }
+    except OSError as exc:
+        raise RPAFrameworkException(
+            f"Falha ao ler o histórico {history_path} (aberto no Excel?) - sem ele não dá para "
+            f"evitar cadastro duplicado na Vibra: {exc}"
+        ) from exc
 
 
 def _load_mock_trips(mock_path: str) -> List[dict]:

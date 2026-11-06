@@ -20,7 +20,7 @@ COOKIES_PATH = "vibra_cookies.json"
 
 # TESTE: horário fixo de carregamento no Agendamento da Vibra, no lugar do loadTime do portal.
 # Para voltar a usar o horário do portal, deixe None.
-TEST_LOAD_TIME_OVERRIDE = "16:00"
+TEST_LOAD_TIME_OVERRIDE = 
 
 
 def process_items(items: List[dict], config: BotConfig, log_module: LogModule) -> None:
@@ -72,9 +72,7 @@ def process_items(items: List[dict], config: BotConfig, log_module: LogModule) -
                 selected = fill_registration(driver, item["pool"], item["plate"], item["carrier"])
                 if item.get("orders"):
                     loaded = load_compartments(driver, item["orders"])
-                    load_time = TEST_LOAD_TIME_OVERRIDE or item["loadTime"]
-                    if TEST_LOAD_TIME_OVERRIDE:
-                        print(f"[AVISO] TESTE: horário {TEST_LOAD_TIME_OVERRIDE} no lugar do portal ({item['loadTime']}).")
+                    load_time = item["loadTime"]
                     vibra_message = schedule_and_finalize(driver, item["loadDate"], load_time)
                     status = STATUS_FINALIZED
                     detail = (

@@ -67,6 +67,10 @@ Transportador = `VIBRA_TRANSPORTADOR` (padrão `BINDI`). Overrides para testes: 
 ex. `planejados.example.json`) e `PROGRAMACOES_PATH` (CSV com colunas `pool`, `placa`, opcional
 `transportador` - sem pedidos, não carrega compartimentos).
 Saída: `programacoes_vibra.csv` (status `FINALIZADO`, `PREENCHIDO` - CSV sem pedidos - ou `ERRO`) + `erro_programacao_N.png`.
+Agendamento: `main.py` repete o pipeline a cada `SCHEDULE_INTERVAL_MINUTES` (padrão 5; 0 = uma
+vez). O CSV de saída é **acumulado** e serve de histórico: o GetDataModule pula viagem + pool já
+`FINALIZADO` (o portal ainda devolve a viagem porque o reporte `registered_at_distributor` não
+existe). Para refazer um teste, apague a linha (ou o arquivo) `programacoes_vibra.csv`.
 
 Compartimentos: cada `items[].compartments[]` do portal é um compartimento alocado na viagem e
 vai **cheio** (o portal não guarda volume por compartimento; volume = `capacityM3`). A Vibra
@@ -124,7 +128,7 @@ Python 3.11+, `selenium`, `python-dotenv`, `requests`.
 
 ### Estrutura de pastas do projeto
 ```
-├── main.py                          ← orquestrador (INIT → GET_DATA → PROCESS → END)
+├── main.py                          ← orquestrador (INIT → GET_DATA → PROCESS → END) em loop
 ├── vibra_programacao.py             ← protótipo original (referência)
 ├── Framework/
 │   ├── InitModule.py                ← valida .env, credenciais e pré-requisitos

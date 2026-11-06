@@ -1,7 +1,10 @@
 """LogModule — único módulo que persiste o resultado local das programações.
-Mantém o CSV de saída aberto durante toda a execução. Fecha no EndModule."""
+Mantém o CSV de saída aberto durante toda a execução. Fecha no EndModule.
+O CSV é acumulado entre execuções: é o histórico que o GetDataModule usa para
+não cadastrar de novo na Vibra uma viagem já FINALIZADA."""
 
 import csv
+import os
 from collections import Counter
 from datetime import datetime
 
@@ -10,6 +13,7 @@ from Framework.RPAFrameworkException import RPAFrameworkException
 STATUS_FILLED = "PREENCHIDO"
 STATUS_FINALIZED = "FINALIZADO"
 STATUS_ERROR = "ERRO"
+OUTPUT_PATH = "programacoes_vibra.csv"
 
 FIELDNAMES = [
     "processed_at", "trip_id", "load_date", "load_time", "order_numbers", "distributor_order_numbers", "pool", "plate", "carrier", "selected_pool", "selected_carrier", "status", "detail",
@@ -17,14 +21,16 @@ FIELDNAMES = [
 
 
 class LogModule:
-    def __init__(self, output_path: str = "programacoes_vibra.csv") -> None:
+    def __init__(self, output_path: str = OUTPUT_PATH) -> None:
         self._output_path = output_path
+        is_new_file = not os.path.isfile(output_path) or os.path.getsize(output_path) == 0
         try:
-            self._file = open(output_path, "w", newline="", encoding="utf-8")
+            self._file = open(output_path, "a", newline="", encoding="utf-8")
         except OSError as exc:
             raise RPAFrameworkException(f"Não foi possível abrir {output_path} para escrita (aberto no Excel?): {exc}") from exc
         self._writer = csv.DictWriter(self._file, fieldnames=FIELDNAMES)
-        self._writer.writeheader()
+        if is_new_file:
+            self._writer.writeheader()
         self._status_count: Counter = Counter()
 
     def write_result(
@@ -59,7 +65,7 @@ class LogModule:
         self._file.close()
         total = sum(self._status_count.values())
         print(
-            f"[OK] {total} programação(ões) gravada(s) em {self._output_path} "
+            f"[OK] {total} programação(ões) desta execução gravada(s) em {self._output_path} "
             f"({self._status_count[STATUS_FINALIZED]} finalizada(s), {self._status_count[STATUS_FILLED]} só preenchida(s), "
             f"{self._status_count[STATUS_ERROR]} com erro)."
         )
