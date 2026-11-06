@@ -1,0 +1,20 @@
+# Credenciais - nunca versionar
+.env
+
+# Ambiente virtual Python
+venv/
+
+# Bytecode compilado
+__pycache__/
+*.pyc
+
+# Saída do bot - gerada a cada execução, não é código
+programacoes_vibra.csv
+erro_*.png
+
+# Config local do Claude Code
+.claude/
+mfa_code.txt
+run.log
+chrome_profile/
+vibra_cookies.json
