@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 from Framework import EndModule, GetDataModule, InitModule, ProcessModule
+from Framework.ProcessModule import short_error
 from Framework.RPAFrameworkException import RPAFrameworkException
 from Log.LogModule import LogModule
 
@@ -64,8 +65,10 @@ def main() -> None:
             print(f"[INFO] Ciclo {cycle} iniciado em {started_at:%d/%m/%Y %H:%M:%S}")
             try:
                 run()
-            except Exception:  # noqa: BLE001 - um ciclo com erro inesperado não pode matar o agendamento
-                print(f"[ERRO] Erro inesperado no ciclo {cycle}:\n{traceback.format_exc()}")
+            except Exception as exc:  # noqa: BLE001 - um ciclo com erro inesperado não pode matar o agendamento
+                # Erros conhecidos já viram [ERRO]/[ERRO Framework] curtos; aqui só chega bug - o traceback ajuda a achar.
+                print(f"[ERRO] Ciclo {cycle} interrompido por erro inesperado: {short_error(exc)}")
+                print(f"[INFO] Detalhes técnicos do erro:\n{traceback.format_exc()}")
 
             # O intervalo conta do início do ciclo; se o ciclo demorou mais que ele, o próximo começa já.
             next_run = started_at + timedelta(minutes=interval_minutes)

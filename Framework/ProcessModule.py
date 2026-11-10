@@ -6,6 +6,8 @@ demais."""
 import os
 from typing import List
 
+from selenium.common.exceptions import WebDriverException
+
 from Automation.VibraPortal import (
     fill_registration,
     load_compartments,
@@ -14,6 +16,7 @@ from Automation.VibraPortal import (
     schedule_and_finalize,
 )
 from Framework.InitModule import BotConfig
+from Framework.RPAFrameworkException import RPAFrameworkException
 from Log.LogModule import STATUS_ERROR, STATUS_FILLED, STATUS_FINALIZED, LogModule
 from Utils.DriverFactory import create_driver, load_cookies, save_cookies
 
@@ -26,28 +29,40 @@ def process_items(items: List[dict], config: BotConfig, log_module: LogModule) -
         print("[INFO] Nenhuma programação a registrar na Vibra - não abrindo o navegador.")
         return
 
-    driver = create_driver(
-        headless=config.headless,
-        user_data_dir=config.chrome_user_data_dir,
-        profile_directory=config.chrome_profile_directory,
-        user_agent=config.chrome_user_agent,
-        window_size=config.chrome_window_size,
-        chrome_binary_path=config.chrome_binary_path,
-    )
+    try:
+        driver = create_driver(
+            headless=config.headless,
+            user_data_dir=config.chrome_user_data_dir,
+            profile_directory=config.chrome_profile_directory,
+            user_agent=config.chrome_user_agent,
+            window_size=config.chrome_window_size,
+            chrome_binary_path=config.chrome_binary_path,
+        )
+    except Exception as exc:  # noqa: BLE001 - sem navegador nenhuma programação roda
+        raise RPAFrameworkException(f"Não foi possível abrir o Chrome: {short_error(exc)}") from exc
 
     cookies_path = os.environ.get("VIBRA_COOKIES_PATH", "").strip() or DEFAULT_COOKIES_PATH
     logged_in = False
     try:
         load_cookies(driver, cookies_path)
-        login(
-            driver,
-            config.username,
-            config.password,
-            config.mfa_wait_seconds,
-            token_api_url=config.token_api_url,
-            token_api_token=config.token_api_token,
-            token_timeout_seconds=config.token_timeout_seconds,
-        )
+        try:
+            login(
+                driver,
+                config.username,
+                config.password,
+                config.mfa_wait_seconds,
+                token_api_url=config.token_api_url,
+                token_api_token=config.token_api_token,
+                token_timeout_seconds=config.token_timeout_seconds,
+            )
+        except RPAFrameworkException:
+            raise
+        except Exception as exc:  # noqa: BLE001 - sem login nenhuma programação roda; tenta no próximo ciclo
+            screenshot_path = _save_screenshot(driver, "erro_login.png")
+            raise RPAFrameworkException(
+                f"Login na Vibra falhou: {short_error(exc)} (screenshot: {screenshot_path}). "
+                f"{len(items)} programação(ões) ficam para o próximo ciclo."
+            ) from exc
         logged_in = True
         save_cookies(driver, cookies_path)
         main_handle = driver.current_window_handle
@@ -85,8 +100,9 @@ def process_items(items: List[dict], config: BotConfig, log_module: LogModule) -
                 print(f"[OK] Programação da placa {item['plate']}: {status}.")
             except Exception as exc:  # noqa: BLE001 - erro por programação não pode parar o loop
                 screenshot_path = _save_screenshot(driver, f"erro_programacao_{index}.png")
-                print(f"[ERRO] Falha na programação da placa {item['plate']}: {exc}")
-                log_module.write_result(item, STATUS_ERROR, detail=f"{exc} (screenshot: {screenshot_path})")
+                message = short_error(exc)
+                print(f"[ERRO] Falha na programação da placa {item['plate']}: {message}")
+                log_module.write_result(item, STATUS_ERROR, detail=f"{message} (screenshot: {screenshot_path})")
     finally:
         # Só com login confirmado: cookies de uma tentativa falha sobrescreveriam uma sessão boa.
         if logged_in:
@@ -95,6 +111,15 @@ def process_items(items: List[dict], config: BotConfig, log_module: LogModule) -
             driver.quit()
         except Exception as exc:  # noqa: BLE001 - falha ao encerrar não pode mascarar um erro anterior
             print(f"[AVISO] Falha ao encerrar o Chrome ao final da execução (ignorado): {exc}")
+
+
+def short_error(exc: BaseException) -> str:
+    """Mensagem de erro legível numa linha. Exceções do Selenium trazem o
+    stacktrace interno do chromedriver no texto, que só polui o log."""
+    message = exc.msg if isinstance(exc, WebDriverException) and exc.msg else str(exc)
+    message = message.split("Stacktrace:")[0].strip()
+    message = " ".join(message.split()) or type(exc).__name__
+    return message if len(message) <= 400 else message[:400] + "..."
 
 
 def _save_screenshot(driver, path: str) -> str:

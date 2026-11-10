@@ -11,6 +11,7 @@ import subprocess
 from typing import Optional
 
 from selenium import webdriver
+from selenium.webdriver.chrome.service import Service as ChromeService
 
 from Framework.RPAFrameworkException import RPAFrameworkException
 
@@ -53,26 +54,40 @@ def resolve_chrome_binary(explicit_path: Optional[str]) -> Optional[str]:
     return explicit_path
 
 
+_chrome_diagnosed = False
+
+
 def _diagnose_chrome_binary(chrome_binary_path: Optional[str]) -> None:
-    """Roda o binário do Chrome direto, fora do Selenium, só pra log - o
-    ChromeDriver só repassa 'Chrome instance exited' genérico quando o
-    processo morre na inicialização, sem o stderr real do Chrome. Chamado só
-    no caminho headless (container), onde esse erro apareceu; não deve travar
-    a execução se o próprio diagnóstico falhar."""
+    """Roda o binário do Chrome direto, fora do Selenium - o ChromeDriver só
+    repassa um 'Chrome instance exited' genérico quando o processo morre na
+    inicialização. Uma vez por processo; se o Chrome sobe, vira uma linha [OK].
+    O stderr só é mostrado em caso de falha: com sucesso ele só tem avisos
+    inofensivos de container (dbus etc.) que parecem erro no log."""
+    global _chrome_diagnosed
+    if _chrome_diagnosed:
+        return
+    _chrome_diagnosed = True
+
     binary = chrome_binary_path or "google-chrome"
-    for args in (
-        ["--version"],
-        ["--headless=new", "--no-sandbox", "--disable-dev-shm-usage", "--dump-dom", "about:blank"],
-    ):
-        try:
-            result = subprocess.run([binary, *args], capture_output=True, text=True, timeout=30)
-            print(f"[INFO] Diagnóstico Chrome: `{binary} {' '.join(args)}` -> exit={result.returncode}")
-            if result.stdout.strip():
-                print(f"[INFO] Diagnóstico Chrome (stdout): {result.stdout.strip()[:500]}")
-            if result.stderr.strip():
-                print(f"[INFO] Diagnóstico Chrome (stderr): {result.stderr.strip()[:1500]}")
-        except Exception as exc:  # noqa: BLE001 - diagnóstico não pode derrubar a execução
-            print(f"[AVISO] Falha ao rodar diagnóstico do Chrome ({args}): {exc}")
+    try:
+        version = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=30)
+        smoke_test = subprocess.run(
+            [binary, "--headless=new", "--no-sandbox", "--disable-dev-shm-usage", "--log-level=3",
+             "--dump-dom", "about:blank"],
+            capture_output=True, text=True, timeout=60,
+        )
+    except Exception as exc:  # noqa: BLE001 - diagnóstico não pode derrubar a execução
+        print(f"[AVISO] Não foi possível rodar o Chrome ({binary}) para diagnóstico: {exc}")
+        return
+
+    if version.returncode == 0 and smoke_test.returncode == 0:
+        print(f"[OK] Chrome pronto: {version.stdout.strip() or binary}")
+        return
+    print(f"[AVISO] Chrome não abriu no diagnóstico ({binary}): versão exit={version.returncode}, "
+          f"teste headless exit={smoke_test.returncode}.")
+    details = (smoke_test.stderr or version.stderr or "").strip()
+    if details:
+        print(f"[AVISO] Saída do Chrome: {details[-1500:]}")
 
 
 def create_driver(
@@ -169,11 +184,15 @@ def create_driver(
         # /tmp (disco) em vez de shared memory.
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
+        # Só mensagens fatais do Chrome: no container ele imprime avisos de dbus
+        # a cada abertura, que são inofensivos mas parecem erro no log.
+        options.add_argument("--log-level=3")
         _diagnose_chrome_binary(chrome_binary_path)
     elif window_size:
         options.add_argument(f"--window-size={window_size}")
 
-    driver = webdriver.Chrome(options=options)
+    # Saída do chromedriver descartada pelo mesmo motivo; falhas dele chegam como exceção.
+    driver = webdriver.Chrome(options=options, service=ChromeService(log_output=subprocess.DEVNULL))
 
     try:
         driver.execute_cdp_cmd(
