@@ -3,6 +3,7 @@ planejada no Portal Bindi Log + posto), abre Programação FOB > Cadastrar e
 preenche Pool, Placa e Transportador. Erro em uma programação não interrompe as
 demais."""
 
+import os
 from typing import List
 
 from Automation.VibraPortal import (
@@ -16,7 +17,7 @@ from Framework.InitModule import BotConfig
 from Log.LogModule import STATUS_ERROR, STATUS_FILLED, STATUS_FINALIZED, LogModule
 from Utils.DriverFactory import create_driver, load_cookies, save_cookies
 
-COOKIES_PATH = "vibra_cookies.json"
+DEFAULT_COOKIES_PATH = "vibra_cookies.json"
 
 
 def process_items(items: List[dict], config: BotConfig, log_module: LogModule) -> None:
@@ -34,9 +35,10 @@ def process_items(items: List[dict], config: BotConfig, log_module: LogModule) -
         chrome_binary_path=config.chrome_binary_path,
     )
 
+    cookies_path = os.environ.get("VIBRA_COOKIES_PATH", "").strip() or DEFAULT_COOKIES_PATH
     logged_in = False
     try:
-        load_cookies(driver, COOKIES_PATH)
+        load_cookies(driver, cookies_path)
         login(
             driver,
             config.username,
@@ -47,7 +49,7 @@ def process_items(items: List[dict], config: BotConfig, log_module: LogModule) -
             token_timeout_seconds=config.token_timeout_seconds,
         )
         logged_in = True
-        save_cookies(driver, COOKIES_PATH)
+        save_cookies(driver, cookies_path)
         main_handle = driver.current_window_handle
 
         for index, item in enumerate(items, start=1):
@@ -88,7 +90,7 @@ def process_items(items: List[dict], config: BotConfig, log_module: LogModule) -
     finally:
         # Só com login confirmado: cookies de uma tentativa falha sobrescreveriam uma sessão boa.
         if logged_in:
-            save_cookies(driver, COOKIES_PATH)
+            save_cookies(driver, cookies_path)
         try:
             driver.quit()
         except Exception as exc:  # noqa: BLE001 - falha ao encerrar não pode mascarar um erro anterior

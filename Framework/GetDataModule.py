@@ -12,7 +12,7 @@ from typing import Dict, List, Optional
 
 from Framework.InitModule import BotConfig
 from Framework.RPAFrameworkException import RPAFrameworkException
-from Log.LogModule import OUTPUT_PATH, STATUS_FINALIZED
+from Log.LogModule import STATUS_FINALIZED, output_path
 from Utils.PortalClient import fetch_planned_trips
 
 REQUIRED_CSV_COLUMNS = ("pool", "placa")
@@ -53,12 +53,13 @@ def get_data(config: BotConfig) -> List[dict]:
                 }
             )
 
-    finalized_keys = _load_finalized_keys(OUTPUT_PATH)
+    history_path = output_path()
+    finalized_keys = _load_finalized_keys(history_path)
     pending = [item for item in items if _item_key(item["tripId"], item["pool"]) not in finalized_keys]
     if len(pending) < len(items):
         print(
             f"[INFO] {len(items) - len(pending)} programação(ões) ignorada(s): já FINALIZADA(S) na Vibra "
-            f"(histórico em {OUTPUT_PATH})."
+            f"(histórico em {history_path})."
         )
     print(f"[OK] {len(pending)} programação(ões) a registrar na Vibra.")
     return pending

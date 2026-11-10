@@ -7,13 +7,21 @@ import csv
 import os
 from collections import Counter
 from datetime import datetime
+from typing import Optional
 
 from Framework.RPAFrameworkException import RPAFrameworkException
 
 STATUS_FILLED = "PREENCHIDO"
 STATUS_FINALIZED = "FINALIZADO"
 STATUS_ERROR = "ERRO"
-OUTPUT_PATH = "programacoes_vibra.csv"
+DEFAULT_OUTPUT_PATH = "programacoes_vibra.csv"
+
+
+def output_path() -> str:
+    """PROGRAMACOES_OUTPUT_PATH (no Railway, num Volume em /data) - lido na hora,
+    porque o .env só é carregado depois dos imports."""
+    return os.environ.get("PROGRAMACOES_OUTPUT_PATH", "").strip() or DEFAULT_OUTPUT_PATH
+
 
 FIELDNAMES = [
     "processed_at", "trip_id", "load_date", "load_time", "order_numbers", "distributor_order_numbers", "pool", "plate", "carrier", "selected_pool", "selected_carrier", "status", "detail",
@@ -21,13 +29,16 @@ FIELDNAMES = [
 
 
 class LogModule:
-    def __init__(self, output_path: str = OUTPUT_PATH) -> None:
-        self._output_path = output_path
-        is_new_file = not os.path.isfile(output_path) or os.path.getsize(output_path) == 0
+    def __init__(self, path: Optional[str] = None) -> None:
+        self._output_path = path or output_path()
+        is_new_file = not os.path.isfile(self._output_path) or os.path.getsize(self._output_path) == 0
         try:
-            self._file = open(output_path, "a", newline="", encoding="utf-8")
+            os.makedirs(os.path.dirname(os.path.abspath(self._output_path)), exist_ok=True)
+            self._file = open(self._output_path, "a", newline="", encoding="utf-8")
         except OSError as exc:
-            raise RPAFrameworkException(f"Não foi possível abrir {output_path} para escrita (aberto no Excel?): {exc}") from exc
+            raise RPAFrameworkException(
+                f"Não foi possível abrir {self._output_path} para escrita (aberto no Excel?): {exc}"
+            ) from exc
         self._writer = csv.DictWriter(self._file, fieldnames=FIELDNAMES)
         if is_new_file:
             self._writer.writeheader()

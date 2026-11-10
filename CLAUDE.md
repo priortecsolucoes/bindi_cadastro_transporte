@@ -145,6 +145,7 @@ Python 3.11+, `selenium`, `python-dotenv`, `requests`.
 ├── Log/
 │   └── LogModule.py                 ← grava o resultado em programacoes_vibra.csv
 ├── programacoes.example.csv
+├── Dockerfile / railway.json / .dockerignore   ← deploy no Railway
 ├── requirements.txt
 ├── .env                              ← não versionar
 └── .env.example
@@ -203,5 +204,12 @@ toda a execução. `write_value(row_index, column_name, value)`. Fecha no `EndMo
 - Não usar `logging` do Python — `print` direto conforme padrão Priortec.
 
 ## Deploy
-Ainda não configurado (sem Dockerfile/railway.json): o fluxo não salva o cadastro e a 2FA depende
-da Vibra Token API (Bindi-Email) estar no ar. Quando for o caso, seguir o mesmo desenho do Bindi - Vibra.
+Railway, serviço **contínuo** (não é cron): `Dockerfile` (`python:3.11-slim-bookworm` + Google
+Chrome do .deb oficial, instalado COM recommends - sem eles o chromedriver morre com status 127)
++ `railway.json` (`restartPolicyType: ON_FAILURE`). O `main.py` repete o ciclo a cada
+`SCHEDULE_INTERVAL_MINUTES`. `CHROME_HEADLESS=1` fixo na imagem; 2FA só pela Vibra Token API
+(não há quem digite o código).
+**Volume obrigatório em `/data`**: o Dockerfile aponta `PROGRAMACOES_OUTPUT_PATH`,
+`VIBRA_COOKIES_PATH` e `CHROME_USER_DATA_DIR` para lá. Sem Volume, cada deploy/restart apaga o
+histórico de FINALIZADOS e as viagens seriam cadastradas de novo na Vibra.
+Variáveis no dashboard do Railway (as do `.env.example`), nunca no Dockerfile.
