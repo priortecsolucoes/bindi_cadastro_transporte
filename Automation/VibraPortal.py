@@ -89,7 +89,7 @@ def login(
         )
     except TimeoutException as exc:
         raise RuntimeError(
-            f"Nem a tela de login nem o menu do portal apareceram a tempo. URL atual: {driver.current_url}"
+            f"Nem a tela de login nem o menu do portal apareceram em {timeout}s. {_page_summary(driver)}"
         ) from exc
 
     if driver.find_elements(By.CSS_SELECTOR, MENU_BUTTON_SELECTOR):
@@ -115,7 +115,7 @@ def login(
     except TimeoutException as exc:
         raise RuntimeError(
             "Login não confirmado: o menu do portal não carregou. "
-            f"Verifique usuário/senha. URL atual: {driver.current_url}"
+            f"Verifique usuário/senha. {_page_summary(driver)}"
         ) from exc
 
     if _is_mfa_screen(driver):
@@ -196,6 +196,21 @@ def _submit_mfa_code(driver: webdriver.Chrome, code: str) -> bool:
     inputs[0].clear()
     inputs[0].send_keys(code, Keys.ENTER)
     return True
+
+
+def _page_summary(driver: webdriver.Chrome) -> str:
+    """URL, título e início do texto da página - no Railway o screenshot fica
+    preso no container, então o log precisa dizer o que apareceu na tela."""
+    try:
+        title = driver.title.strip()
+        body_text = " ".join(driver.find_element(By.TAG_NAME, "body").text.split())
+    except Exception as exc:  # noqa: BLE001 - resumo é diagnóstico, não pode esconder o erro original
+        return f"URL atual: {driver.current_url} (não foi possível ler a página: {type(exc).__name__})"
+
+    summary = f"URL atual: {driver.current_url} | título: '{title or '-'}' | texto: '{body_text[:300] or '(página em branco)'}'"
+    if "access denied" in f"{title} {body_text}".lower():
+        summary = "A Vibra recusou o acesso deste servidor (Access Denied). " + summary
+    return summary
 
 
 def _is_mfa_screen(driver: webdriver.Chrome) -> bool:
