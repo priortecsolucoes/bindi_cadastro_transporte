@@ -11,6 +11,7 @@ import time
 import unicodedata
 from typing import Dict, List, Optional
 
+from dotenv import load_dotenv
 from selenium import webdriver
 from selenium.common.exceptions import (
     ElementClickInterceptedException,
@@ -27,8 +28,22 @@ from Utils.TokenApiClient import fetch_token, prepare_token
 
 START_URL = "https://cn.vibraenergia.com.br/consultar-pedidos/"
 
-DEFAULT_TIMEOUT = 30
-SLOW_SCREEN_TIMEOUT = 600  # a tela após "Pesquisar" às vezes demora bastante
+DEFAULT_TIMEOUT_ENV = "VIBRA_TIMEOUT_S"
+SLOW_SCREEN_TIMEOUT_ENV = "VIBRA_SLOW_SCREEN_TIMEOUT_S"
+
+
+def _env_seconds(var_name: str, default: int) -> int:
+    # Valor inválido é barrado no InitModule com erro claro; aqui só não pode quebrar o import.
+    raw_value = os.environ.get(var_name, "").strip()
+    return int(raw_value) if raw_value.isdigit() and int(raw_value) > 0 else default
+
+
+# Os timeouts são usados como valor padrão de parâmetros, então precisam existir no import -
+# que acontece antes do load_dotenv() do main.py. Não sobrescreve variáveis já definidas (Railway).
+load_dotenv()
+DEFAULT_TIMEOUT = _env_seconds(DEFAULT_TIMEOUT_ENV, 30)
+# A tela após "Pesquisar" (e as seguintes) às vezes demora bastante.
+SLOW_SCREEN_TIMEOUT = _env_seconds(SLOW_SCREEN_TIMEOUT_ENV, 600)
 MFA_CODE_FILE = "mfa_code.txt"
 
 # Menu lateral (Angular): recolhido mostra só ícones; os títulos (span.titulo) só

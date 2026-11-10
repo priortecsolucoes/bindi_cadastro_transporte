@@ -86,6 +86,13 @@ def initialize() -> BotConfig:
             f"MFA_WAIT_SECONDS deve ser um número inteiro; valor recebido: {raw_mfa_wait!r}"
         ) from exc
 
+    for var_name in ("VIBRA_TIMEOUT_S", "VIBRA_SLOW_SCREEN_TIMEOUT_S"):
+        raw_timeout = os.environ.get(var_name, "").strip()
+        if raw_timeout and (not raw_timeout.isdigit() or int(raw_timeout) < 1):
+            raise RPAFrameworkException(
+                f"{var_name} deve ser um inteiro positivo (segundos); valor recebido: {raw_timeout!r}"
+            )
+
     # Vibra Token API (projeto Bindi-Email): lê o código de 2FA no Gmail. Sem ela,
     # o código precisa ser digitado na janela ou gravado em mfa_code.txt.
     # VIBRA_TOKEN_API_URL=0 desliga a API (modo manual).

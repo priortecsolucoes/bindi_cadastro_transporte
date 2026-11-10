@@ -120,6 +120,9 @@ Agendamento          Bootstrap Datepicker inline #datepickid .datepicker-days: t
                      select#combo_horarios (option value "16:00", texto "06/11/2026 - 16:00",
                      onchange mojarra.ab); a#botao_cria1 'Finalizar'
 ```
+Timeouts: `VIBRA_TIMEOUT_S` (padrão 30, elementos comuns) e `VIBRA_SLOW_SCREEN_TIMEOUT_S`
+(padrão 600, telas lentas + AJAX). Lidos no import do VibraPortal (que chama `load_dotenv()`
+por isso); validados no InitModule.
 A tela de Programação FOB é JSF: selecionar via jQuery `.val().trigger('change')` (digitar no
 select2 se perde na re-renderização) e esperar `jQuery.active` / `jsf.ajax` zerarem.
 
