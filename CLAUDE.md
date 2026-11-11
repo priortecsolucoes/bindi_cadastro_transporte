@@ -66,11 +66,26 @@ O GetDataModule gera **uma programação por viagem + pool** (pedidos do mesmo p
 Transportador = `VIBRA_TRANSPORTADOR` (padrão `BINDI`). Overrides para testes: `PLANEJADOS_MOCK_PATH` (JSON no formato acima,
 ex. `planejados.example.json`) e `PROGRAMACOES_PATH` (CSV com colunas `pool`, `placa`, opcional
 `transportador` - sem pedidos, não carrega compartimentos).
-Saída: `programacoes_vibra.csv` (status `FINALIZADO`, `PREENCHIDO` - CSV sem pedidos - ou `ERRO`) + `erro_programacao_N.png`.
+Saída: `programacoes_vibra.csv` (status `FINALIZADO`, `PREENCHIDO` - CSV sem pedidos -, `ERRO_PORTAL`
+- erro enviado ao portal - ou `ERRO` - erro técnico, tenta de novo) + `erro_programacao_N.png`.
+
+Retorno ao portal: `POST /api/rpa/vibra/programacoes` (`Utils/PortalClient.report_registration`;
+rota em `C:\Priortec\Bindi-PAINEL\app\api\rpa\vibra\programacoes\route.ts`), uma chamada por
+viagem + pool: `{ tripId, distributorMessage?, orders: [{ orderId, registered, observation? }] }`.
+- Cadastrada -> pedido `registered_at_distributor` e a viagem sai de `planejados`.
+- `RegistrationError` (VibraPortal: horário indisponível, dia bloqueado, placa/posto não aceitos,
+  pedido fora da Lista de Remessas, compartimento inexistente/ocupado/capacidade diferente, recusa no
+  Finalizar) -> pedido `scheduling_error` com `user_message` como observação em aberto. O portal só
+  devolve a viagem depois que o usuário reabrir, corrigir e liberar de novo (`trip.updated_at` mais
+  novo que a nota de erro - `lib/rpaPlannedTrips.ts`), então o erro não repete a cada ciclo.
+- Erro técnico (`RuntimeError`): tenta de novo nos próximos ciclos; na `MAX_TECHNICAL_ATTEMPTS`ª
+  (3) seguida vai ao portal como erro com mensagem genérica de falha técnica.
+- Mock (`PLANEJADOS_MOCK_PATH`) e `PROGRAMACOES_PATH` não enviam nada ao portal.
 Agendamento: `main.py` repete o pipeline a cada `SCHEDULE_INTERVAL_MINUTES` (padrão 5; 0 = uma
-vez). O CSV de saída é **acumulado** e serve de histórico: o GetDataModule pula viagem + pool já
-`FINALIZADO` (o portal ainda devolve a viagem porque o reporte `registered_at_distributor` não
-existe). Para refazer um teste, apague a linha (ou o arquivo) `programacoes_vibra.csv`.
+vez). O CSV de saída é **acumulado** e serve de histórico: viagem + pool já `FINALIZADO` nunca é
+cadastrada de novo na Vibra - se o portal ainda a devolve (retorno falhou), só o resultado é
+reenviado, sem abrir o navegador. Também conta os `ERRO` técnicos seguidos (zera em `ERRO_PORTAL`).
+Para refazer um teste, apague a linha (ou o arquivo) `programacoes_vibra.csv`.
 
 Compartimentos: cada `items[].compartments[]` do portal é um compartimento alocado na viagem e
 vai **cheio** (o portal não guarda volume por compartimento; volume = `capacityM3`). A Vibra
@@ -83,7 +98,8 @@ HIDRATADO COMBUSTIVEL"), confere capacidade e compartimento vazio, carrega e con
 - Tela depois do "Finalizar" (mensagem de sucesso/erro da Vibra) não confirmada via DOM:
   erros procurados em `.alert-danger`/`.ui-messages-error`. Motorista não é informado em
   nenhuma tela vista até aqui.
-- Reporte ao portal (`registered_at_distributor` + observações) só depois que o salvar existir.
+- Saldo insuficiente / produto em análise (ER: reverte para `planned` sem erro) ainda não é
+  identificado na Vibra: hoje cai em "pedido não disponível na Lista de Remessas" (`scheduling_error`).
 - Preencher `VIBRA_TOKEN_API_TOKEN` (= `API_TOKEN` do serviço `bindi_email_token_reader` no
   Railway, `https://emailtokenreader.up.railway.app`, padrão de `VIBRA_TOKEN_API_URL`) e
   confirmar que o e-mail de 2FA da conta `VIBRA_USUARIO` chega no Gmail lido pela API.
@@ -144,7 +160,7 @@ Python 3.11+, `selenium`, `python-dotenv`, `requests`.
 ├── Utils/
 │   ├── DriverFactory.py             ← cria o Chrome WebDriver + persiste cookies do SSO
 │   ├── TokenApiClient.py            ← cliente da Vibra Token API (código de 2FA do e-mail)
-│   └── PortalClient.py              ← cliente HTTP do Portal Bindi Log (pedidos planejados)
+│   └── PortalClient.py              ← cliente HTTP do Portal Bindi Log (planejados + resultado)
 ├── Log/
 │   └── LogModule.py                 ← grava o resultado em programacoes_vibra.csv
 ├── programacoes.example.csv

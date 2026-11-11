@@ -62,6 +62,17 @@ MENU_LEAF_XPATH = (
 PLATE_INPUT_XPATH = "//input[@value='Buscar']/ancestor::div[1]//input[@type='text']"
 
 
+class RegistrationError(RuntimeError):
+    """Erro de dados da programação que o usuário corrige no Portal Bindi Log
+    (horário indisponível, placa ou compartimento recusado...): user_message
+    volta para o portal; o texto completo (str) traz o detalhe técnico para o log.
+    Erro técnico (tela lenta, elemento não encontrado) continua RuntimeError."""
+
+    def __init__(self, user_message: str, technical_detail: str = ""):
+        super().__init__(f"{user_message} ({technical_detail})" if technical_detail else user_message)
+        self.user_message = user_message
+
+
 # --------------------------------------------------------------------------
 # Login
 # --------------------------------------------------------------------------
@@ -290,7 +301,13 @@ def fill_registration(driver: webdriver.Chrome, pool: str, plate: str, carrier: 
     """Preenche Pool, Placa (+ Buscar) e Transportador na tela de Compartimentação.
     Devolve o texto das opções efetivamente selecionadas nos combos."""
     print(f"[INFO] Pool: {pool}")
-    selected_pool = _select_select2(driver, "comboPool", pool)
+    selected_pool = _select_select2(
+        driver, "comboPool", pool,
+        not_found_message=(
+            f"Posto '{pool}' não encontrado no Pool da Programação FOB da Vibra. Confira o nome do posto "
+            "na distribuidora (cadastro do posto) ou se a Vibra liberou esse posto para a BindiLog."
+        ),
+    )
     _wait_page_ready(driver)
 
     print(f"[INFO] Placa: {plate}")
@@ -306,8 +323,10 @@ def fill_registration(driver: webdriver.Chrome, pool: str, plate: str, carrier: 
             EC.presence_of_element_located((By.ID, "cmbTranspp"))
         )
     except TimeoutException as exc:
-        raise RuntimeError(
-            f"Combo de transportador não apareceu após buscar a placa {plate} - verifique se a placa é válida."
+        raise RegistrationError(
+            f"A Vibra não aceitou a placa {plate}. Confira se o cavalo está cadastrado na Vibra "
+            "para a BindiLog ou troque o caminhão da viagem.",
+            f"combo de transportador não apareceu em {SLOW_SCREEN_TIMEOUT}s após Buscar",
         ) from exc
     selected_carrier = _select_select2(driver, "cmbTranspp", carrier)
     _wait_page_ready(driver)
@@ -341,7 +360,7 @@ def load_compartments(driver: webdriver.Chrome, orders: List[dict]) -> List[str]
         for compartment in item.get("compartments", [])
     ]
     if not allocations:
-        raise RuntimeError("A programação não tem nenhum compartimento alocado no portal - nada a carregar.")
+        raise RegistrationError("A viagem não tem nenhum compartimento alocado para os pedidos deste posto.")
 
     _install_ajax_monitor(driver)
     summary: List[str] = []
@@ -413,9 +432,12 @@ def schedule_and_finalize(driver: webdriver.Chrome, load_date: str, load_time: s
 
     option = _schedule_option(driver, wanted_text)
     if not option:
-        raise RuntimeError(
-            f"Horário {wanted_text} não está disponível na Vibra. "
-            f"Opções na tela: {', '.join(_schedule_option_texts(driver)) or 'nenhuma'}."
+        date_prefix = wanted_text.split(" - ")[0]
+        free_times = [text.split(" - ")[-1] for text in _schedule_option_texts(driver) if text.startswith(date_prefix)]
+        raise RegistrationError(
+            f"Horário {load_time} de {date_prefix} indisponível na Vibra. "
+            + (f"Horários livres no dia: {', '.join(free_times)}." if free_times else "Nenhum horário livre no dia.")
+            + " Ajuste o horário do carregamento VIBRA na viagem."
         )
     Select(driver.find_element(By.ID, SCHEDULE_TIME_SELECT_ID)).select_by_value(option.get_attribute("value"))
     _wait_page_ready(driver)
@@ -432,7 +454,7 @@ def schedule_and_finalize(driver: webdriver.Chrome, load_date: str, load_time: s
     errors = [el.text.strip() for el in driver.find_elements(By.CSS_SELECTOR, ERROR_MESSAGE_SELECTORS)
               if el.is_displayed() and el.text.strip()]
     if errors:
-        raise RuntimeError(f"Vibra recusou a programação ao Finalizar: {' | '.join(errors)}")
+        raise RegistrationError(f"A Vibra recusou a programação ao Finalizar: {' | '.join(errors)}")
     messages = [el.text.strip() for el in driver.find_elements(By.CSS_SELECTOR, MESSAGE_SELECTORS)
                 if el.is_displayed() and el.text.strip()]
     message = " | ".join(dict.fromkeys(messages))
@@ -478,7 +500,10 @@ def _select_calendar_day(driver: webdriver.Chrome, year: int, month: int, day: i
     if not day_cells:
         raise RuntimeError(f"Dia {day} não encontrado no calendário de {month:02d}/{year}.")
     if "disabled" in (day_cells[0].get_attribute("class") or "").split():
-        raise RuntimeError(f"Dia {day:02d}/{month:02d}/{year} está bloqueado no calendário da Vibra (sem agendamento).")
+        raise RegistrationError(
+            f"Dia {day:02d}/{month:02d}/{year} está bloqueado para agendamento na Vibra. "
+            "Ajuste a data de carga da viagem."
+        )
 
     print(f"[INFO] Calendário: clicando no dia {day:02d}/{month:02d}/{year}")
     _scroll_and_click(driver, day_cells[0])
@@ -525,15 +550,19 @@ def _find_shipment_row(driver: webdriver.Chrome, order_number: str, product_name
     same_order = [entry for entry in entries if _same_order_number(entry[3], order_number)]
     if not same_order:
         available = ", ".join(sorted({entry[3] for entry in entries}))
-        raise RuntimeError(f"Ordem {order_number} não está na Lista de Remessas da Vibra (ordens na tela: {available}).")
+        raise RegistrationError(
+            f"Pedido Vibra {order_number} não está disponível para programação na Vibra "
+            "(pode estar em análise, sem saldo, já programado ou com outro posto).",
+            f"ordens na tela: {available}",
+        )
 
     wanted_words = _product_words(product_name)
     matches = [entry for entry in same_order if wanted_words <= _product_words(entry[1])]
     if not matches:
         if len(same_order) > 1:
-            raise RuntimeError(
-                f"Ordem {order_number}: produto '{product_name}' não identificado entre as remessas "
-                f"{', '.join(entry[1] for entry in same_order)}."
+            raise RegistrationError(
+                f"Pedido Vibra {order_number}: produto '{product_name}' não identificado entre as remessas "
+                f"da Vibra ({', '.join(entry[1] for entry in same_order)}). Confira o produto do pedido."
             )
         print(
             f"[AVISO] Produto '{product_name}' não bate com '{same_order[0][1]}' - "
@@ -573,9 +602,10 @@ def _load_shipment_into_compartment(driver: webdriver.Chrome, shipment_row, comp
             links_by_number[int(digits)] = link
     load_link = links_by_number.get(int(compartment_number))
     if load_link is None:
-        raise RuntimeError(
-            f"Compartimento {compartment_number} não está no modal da Vibra "
-            f"(compartimentos disponíveis: {', '.join(map(str, sorted(links_by_number))) or 'nenhum'})."
+        raise RegistrationError(
+            f"A Vibra não permite carregar a remessa no compartimento {compartment_number} "
+            f"(compartimentos aceitos: {', '.join(map(str, sorted(links_by_number))) or 'nenhum'}). "
+            "Ajuste a alocação dos compartimentos na viagem."
         )
 
     _scroll_and_click(driver, load_link)
@@ -599,9 +629,10 @@ def _find_vehicle_row(driver: webdriver.Chrome, compartment_number: int):
     try:
         return WebDriverWait(driver, DEFAULT_TIMEOUT).until(matching_row)
     except TimeoutException as exc:
-        raise RuntimeError(
-            f"Compartimento {compartment_number} não existe no Carregamento do Veículo da Vibra "
-            "(o caminhão cadastrado lá tem outra compartimentação?)."
+        raise RegistrationError(
+            f"Compartimento {compartment_number} não existe no caminhão cadastrado na Vibra "
+            "(compartimentação diferente da do portal). Confira o caminhão ou a alocação da viagem.",
+            f"linha do compartimento não apareceu em {DEFAULT_TIMEOUT}s no Carregamento do Veículo",
         ) from exc
 
 
@@ -613,7 +644,10 @@ def _vehicle_row_order(vehicle_row) -> str:
 def _check_vehicle_row_free(vehicle_row, compartment_number: int, capacity_m3: float) -> None:
     current_order = _vehicle_row_order(vehicle_row)
     if current_order:
-        raise RuntimeError(f"Compartimento {compartment_number} já está carregado na Vibra com a ordem {current_order}.")
+        raise RegistrationError(
+            f"Compartimento {compartment_number} já está ocupado na Vibra com o pedido {current_order}. "
+            "Confira a alocação dos compartimentos na viagem."
+        )
 
     capacity_select = vehicle_row.find_elements(By.TAG_NAME, "td")[2].find_elements(By.TAG_NAME, "select")
     if not capacity_select:
@@ -621,9 +655,9 @@ def _check_vehicle_row_free(vehicle_row, compartment_number: int, capacity_m3: f
     vibra_capacity_text = _selected_option_text(capacity_select[0])
     vibra_capacity = _parse_vibra_volume(vibra_capacity_text)
     if vibra_capacity is not None and abs(vibra_capacity - capacity_m3) > 0.001:
-        raise RuntimeError(
+        raise RegistrationError(
             f"Compartimento {compartment_number}: capacidade na Vibra é {vibra_capacity_text} m³ e no portal "
-            f"{capacity_m3:g} m³ - o volume carregado seria diferente do programado."
+            f"{capacity_m3:g} m³. Confira o caminhão da viagem ou o cadastro dele na Vibra."
         )
 
 
@@ -831,7 +865,13 @@ def _click(driver: webdriver.Chrome, by: str, selector: str, timeout: int = DEFA
     return element
 
 
-def _select_select2(driver: webdriver.Chrome, select_id: str, text: str, timeout: int = DEFAULT_TIMEOUT) -> str:
+def _select_select2(
+    driver: webdriver.Chrome,
+    select_id: str,
+    text: str,
+    timeout: int = DEFAULT_TIMEOUT,
+    not_found_message: Optional[str] = None,
+) -> str:
     """Seleciona no <select id=select_id> (select2) a opção cujo texto contém `text`.
 
     Não usa o campo de pesquisa do select2: o JSF re-renderiza o combo enquanto se
@@ -865,6 +905,8 @@ def _select_select2(driver: webdriver.Chrome, select_id: str, text: str, timeout
         text,
     )
     if not selected:
+        if not_found_message:
+            raise RegistrationError(not_found_message, f"opção contendo '{text}' não encontrada em #{select_id}")
         raise RuntimeError(f"Opção contendo '{text}' não encontrada em #{select_id}.")
     print(f"[OK]   -> selecionado: {selected}")
     return selected

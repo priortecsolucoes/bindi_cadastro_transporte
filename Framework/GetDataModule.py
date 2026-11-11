@@ -12,7 +12,7 @@ from typing import Dict, List, Optional
 
 from Framework.InitModule import BotConfig
 from Framework.RPAFrameworkException import RPAFrameworkException
-from Log.LogModule import STATUS_FINALIZED, output_path
+from Log.LogModule import STATUS_ERROR, STATUS_ERROR_REPORTED, STATUS_FINALIZED, output_path
 from Utils.PortalClient import fetch_planned_trips
 
 REQUIRED_CSV_COLUMNS = ("pool", "placa")
@@ -20,8 +20,10 @@ REQUIRED_CSV_COLUMNS = ("pool", "placa")
 
 def get_data(config: BotConfig) -> List[dict]:
     """Cada item tem "pool", "plate" e "carrier"; itens do portal também trazem
-    "tripId", "loadDate", "loadTime", "trailerPlates", "driverName", "driverTaxId"
-    e "orders" (pedidos do posto na viagem, com itens e compartimentos)."""
+    "tripId", "loadDate", "loadTime", "trailerPlates", "driverName", "driverTaxId",
+    "orders" (pedidos do posto na viagem, com itens e compartimentos),
+    "reportToPortal" (False no mock), "technicalErrors" (erros técnicos seguidos
+    no histórico) e, se já cadastrada na Vibra, "alreadyFinalized"."""
     if config.schedules_path:
         return _load_from_csv(config.schedules_path, config.carrier)
 
@@ -54,14 +56,30 @@ def get_data(config: BotConfig) -> List[dict]:
             )
 
     history_path = output_path()
-    finalized_keys = _load_finalized_keys(history_path)
-    pending = [item for item in items if _item_key(item["tripId"], item["pool"]) not in finalized_keys]
-    if len(pending) < len(items):
+    history = _load_history(history_path)
+    from_portal = not config.planned_mock_path
+    pending: List[dict] = []
+    finalized_count = 0
+    for item in items:
+        key_history = history.get(_item_key(item["tripId"], item["pool"]), {})
+        item["reportToPortal"] = from_portal
+        item["technicalErrors"] = key_history.get("technical_errors", 0)
+        if key_history.get("finalized"):
+            finalized_count += 1
+            if not from_portal:
+                continue
+            # Já está na Vibra, mas o portal ainda devolve a viagem: o retorno anterior
+            # não chegou. Só reenvia o resultado - cadastrar de novo duplicaria na Vibra.
+            item["alreadyFinalized"] = True
+        pending.append(item)
+
+    if finalized_count:
+        action = "só o resultado será reenviado ao portal" if from_portal else "ignorada(s)"
         print(
-            f"[INFO] {len(items) - len(pending)} programação(ões) ignorada(s): já FINALIZADA(S) na Vibra "
+            f"[INFO] {finalized_count} programação(ões) já FINALIZADA(S) na Vibra - {action} "
             f"(histórico em {history_path})."
         )
-    print(f"[OK] {len(pending)} programação(ões) a registrar na Vibra.")
+    print(f"[OK] {len(pending) - (finalized_count if from_portal else 0)} programação(ões) a registrar na Vibra.")
     return pending
 
 
@@ -69,19 +87,30 @@ def _item_key(trip_id, pool: str) -> tuple:
     return str(trip_id).strip(), (pool or "").strip().upper()
 
 
-def _load_finalized_keys(history_path: str) -> set:
-    """Viagem + pool já finalizados em execuções anteriores. Enquanto o bot não
-    reporta ao portal (registered_at_distributor), o portal continua devolvendo a
-    viagem - sem este filtro ela seria cadastrada de novo na Vibra a cada ciclo."""
+def _load_history(history_path: str) -> Dict[tuple, dict]:
+    """Por viagem + pool: se já foi FINALIZADA na Vibra (nunca cadastrar de novo)
+    e quantos erros técnicos seguidos teve desde o último resultado enviado ao
+    portal - depois de MAX_TECHNICAL_ATTEMPTS o erro vai para o portal em vez de
+    repetir a cada ciclo."""
     if not os.path.isfile(history_path):
-        return set()
+        return {}
+    history: Dict[tuple, dict] = {}
     try:
         with open(history_path, newline="", encoding="utf-8-sig") as file:
-            return {
-                _item_key(row.get("trip_id", ""), row.get("pool", ""))
-                for row in csv.DictReader(file)
-                if row.get("status") == STATUS_FINALIZED and row.get("trip_id")
-            }
+            for row in csv.DictReader(file):
+                if not row.get("trip_id"):
+                    continue
+                entry = history.setdefault(
+                    _item_key(row["trip_id"], row.get("pool", "")), {"finalized": False, "technical_errors": 0}
+                )
+                status = row.get("status")
+                if status == STATUS_FINALIZED:
+                    entry["finalized"] = True
+                elif status == STATUS_ERROR:
+                    entry["technical_errors"] += 1
+                elif status == STATUS_ERROR_REPORTED:
+                    entry["technical_errors"] = 0
+        return history
     except OSError as exc:
         raise RPAFrameworkException(
             f"Falha ao ler o histórico {history_path} (aberto no Excel?) - sem ele não dá para "

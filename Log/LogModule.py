@@ -13,7 +13,11 @@ from Framework.RPAFrameworkException import RPAFrameworkException
 
 STATUS_FILLED = "PREENCHIDO"
 STATUS_FINALIZED = "FINALIZADO"
+# Erro técnico: a programação é tentada de novo no próximo ciclo (ver GetDataModule).
 STATUS_ERROR = "ERRO"
+# Erro informado ao Portal Bindi Log ('Erro no agendamento'): o usuário corrige a
+# viagem e o portal só a devolve depois disso.
+STATUS_ERROR_REPORTED = "ERRO_PORTAL"
 DEFAULT_OUTPUT_PATH = "programacoes_vibra.csv"
 
 
@@ -78,5 +82,6 @@ class LogModule:
         print(
             f"[OK] {total} programação(ões) desta execução gravada(s) em {self._output_path} "
             f"({self._status_count[STATUS_FINALIZED]} finalizada(s), {self._status_count[STATUS_FILLED]} só preenchida(s), "
-            f"{self._status_count[STATUS_ERROR]} com erro)."
+            f"{self._status_count[STATUS_ERROR_REPORTED]} com erro enviado ao portal, "
+            f"{self._status_count[STATUS_ERROR]} com erro técnico)."
         )
