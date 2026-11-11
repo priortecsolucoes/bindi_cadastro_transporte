@@ -210,7 +210,8 @@ toda a execução. `write_value(row_index, column_name, value)`. Fecha no `EndMo
 Railway, serviço **contínuo** (não é cron): `Dockerfile` (`python:3.11-slim-bookworm` + Google
 Chrome do .deb oficial, instalado COM recommends - sem eles o chromedriver morre com status 127)
 + `railway.json` (`restartPolicyType: ON_FAILURE`). O `main.py` repete o ciclo a cada
-`SCHEDULE_INTERVAL_MINUTES`. `CHROME_HEADLESS=1` fixo na imagem; 2FA só pela Vibra Token API
+`SCHEDULE_INTERVAL_MINUTES`. `CHROME_HEADLESS=1` fixo na imagem (a Akamai da Vibra dá "Access Denied" para `HeadlessChrome` no
+User-Agent; o `DriverFactory` troca por `Chrome` em headless); 2FA só pela Vibra Token API
 (não há quem digite o código).
 **Volume obrigatório em `/data`**: o Dockerfile aponta `PROGRAMACOES_OUTPUT_PATH`,
 `VIBRA_COOKIES_PATH` e `CHROME_USER_DATA_DIR` para lá. Sem Volume, cada deploy/restart apaga o
