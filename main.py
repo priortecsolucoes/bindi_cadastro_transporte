@@ -13,11 +13,21 @@ from Framework import EndModule, GetDataModule, InitModule, ProcessModule
 from Framework.ProcessModule import short_error
 from Framework.RPAFrameworkException import RPAFrameworkException
 from Log.LogModule import LogModule
+from Utils.AgentMonitor import monitored_run
 
 DEFAULT_SCHEDULE_INTERVAL_MINUTES = 5
 
 
+AGENT_CODE = "vibra_cadastro"
+AGENT_NAME = "Vibra · Programação FOB"
+
+
 def run() -> None:
+    with monitored_run(AGENT_CODE, AGENT_NAME):
+        _run_pipeline()
+
+
+def _run_pipeline() -> None:
     log_module = None
     try:
         config = InitModule.initialize()
