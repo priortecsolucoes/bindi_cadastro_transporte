@@ -150,7 +150,10 @@ def _register_trip(driver, main_handle: str, config: BotConfig, item: dict) -> t
     company = select_company(driver, config.company)
     open_fob_registration(driver)
     first_pool = item["pools"][0]["pool"]
-    filled = fill_registration(driver, first_pool, item["plate"], item["carrier"])
+    filled = fill_registration(driver, first_pool, item.get("plates") or [item["plate"]], item["carrier"])
+    if filled["plate"] != item["plate"]:
+        print(f"[INFO] Vibra aceitou a carreta {filled['plate']} (a {item['plate']} foi recusada).")
+        item["plate"] = filled["plate"]
     selected = {"pools": {first_pool: filled["pool"]}, "carrier": filled["carrier"]}
     if not item.get("orders"):
         detail = "Sem pedidos (CSV de teste) - compartimentos e agendamento não feitos"

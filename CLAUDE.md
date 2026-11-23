@@ -62,7 +62,9 @@ com nº na Vibra e status antes de `registered_at_distributor`; `trip.load_date`
 ```
 { "trips": [ {
     "tripId", "loadDate", "loadTime" (menor trip_loading VIBRA),
-    "tractorPlate" (vira a Placa), "trailerPlates", "driverName", "driverTaxId",
+    "tractorPlate", "trailerPlates" (Placa na Vibra: a 1ª carreta; se a Vibra recusar - "veículo
+    inválido" - tenta a próxima; sem carreta usa o cavalo),
+    "driverName", "driverTaxId",
     "orders": [ { "orderId", "orderNumber", "distributorOrderNumber",
                   "stationName", "stationDistributorName" (vira o Pool; senão stationName),
                   "items": [ { "orderItemId", "productName", "qtyM3",

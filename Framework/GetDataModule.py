@@ -21,8 +21,9 @@ REQUIRED_CSV_COLUMNS = ("pool", "placa")
 
 def get_data(config: BotConfig) -> List[dict]:
     """Cada item tem "pool" (postos da programação, para o log), "pools"
-    ([{"pool", "orders"}] - um por posto), "plate" e "carrier"; itens do portal também trazem
-    "tripId", "loadDate", "loadTime", "trailerPlates", "driverName", "driverTaxId",
+    ([{"pool", "orders"}] - um por posto), "plate" (1ª carreta), "carrier" e, do portal,
+    "plates" (carretas do conjunto, tentadas na ordem); itens do portal também trazem
+    "tripId", "loadDate", "loadTime", "tractorPlate", "trailerPlates", "driverName", "driverTaxId",
     "orders" (pedidos da viagem, com itens, compartimentos e "vibraPool"),
     "reportToPortal" (False no mock) e "technicalErrors" (erros técnicos seguidos
     no histórico). Posto já FINALIZADO na viagem vem num item próprio, com
@@ -36,6 +37,7 @@ def get_data(config: BotConfig) -> List[dict]:
         trips = fetch_planned_trips(config.portal_api_url, config.portal_api_token, config.portal_pending_days)
     items: List[dict] = []
     for trip in trips:
+        plates = _vibra_plates(trip)
         orders_by_pool: Dict[str, List[dict]] = {}
         for order in trip.get("orders", []):
             pool = order.get("stationDistributorName") or order.get("stationName")
@@ -47,10 +49,12 @@ def get_data(config: BotConfig) -> List[dict]:
         for pool, orders in orders_by_pool.items():
             items.append(
                 {
-                    **_build_item(pool, trip["tractorPlate"], config.carrier),
+                    **_build_item(pool, plates[0], config.carrier),
+                    "plates": plates,
                     "tripId": trip["tripId"],
                     "loadDate": trip.get("loadDate"),
                     "loadTime": trip.get("loadTime"),
+                    "tractorPlate": trip.get("tractorPlate"),
                     "trailerPlates": trip.get("trailerPlates", []),
                     "driverName": trip.get("driverName"),
                     "driverTaxId": trip.get("driverTaxId"),
@@ -146,6 +150,24 @@ def _load_history(history_path: str) -> Dict[tuple, dict]:
         ) from exc
 
 
+def _vibra_plates(trip: dict) -> List[str]:
+    """A Vibra cadastra o veículo pela placa da carreta, não pela do cavalo (com a do
+    cavalo responde "O veículo informado está inválido"). Vão todas as carretas do
+    conjunto, na ordem: se a Vibra recusar a 1ª, o VibraPortal tenta a próxima."""
+    trailer_plates = [_normalize_plate(plate) for plate in trip.get("trailerPlates") or [] if plate and plate.strip()]
+    if trailer_plates:
+        return list(dict.fromkeys(trailer_plates))
+    print(
+        f"[AVISO] Viagem {trip.get('tripId')}: portal não informou a placa da carreta - "
+        f"usando a do cavalo ({trip.get('tractorPlate')})."
+    )
+    return [_normalize_plate(trip["tractorPlate"])]
+
+
+def _normalize_plate(plate: str) -> str:
+    return plate.strip().upper().replace("-", "")
+
+
 def _load_mock_trips(mock_path: str) -> List[dict]:
     try:
         with open(mock_path, encoding="utf-8-sig") as file:
@@ -153,8 +175,10 @@ def _load_mock_trips(mock_path: str) -> List[dict]:
     except (OSError, ValueError, AttributeError) as exc:
         raise RPAFrameworkException(f"Falha ao ler o mock de viagens planejadas {mock_path}: {exc}") from exc
     for trip in trips:
-        if not trip.get("tripId") or not trip.get("tractorPlate"):
-            raise RPAFrameworkException(f"{mock_path}: toda viagem precisa de tripId e tractorPlate ({trip}).")
+        if not trip.get("tripId") or not (trip.get("trailerPlates") or trip.get("tractorPlate")):
+            raise RPAFrameworkException(
+                f"{mock_path}: toda viagem precisa de tripId e trailerPlates (ou tractorPlate) ({trip})."
+            )
     print(f"[AVISO] SIMULAÇÃO: {len(trips)} viagem(ns) lida(s) de {mock_path} (PLANEJADOS_MOCK_PATH) - portal não consultado.")
     return trips
 
@@ -193,7 +217,7 @@ def _load_from_csv(schedules_path: str, default_carrier: str) -> List[dict]:
 def _build_item(pool: str, plate: str, carrier: Optional[str]) -> dict:
     return {
         "pool": pool.strip(),
-        "plate": plate.strip().upper().replace("-", ""),
+        "plate": _normalize_plate(plate),
         "carrier": (carrier or "").strip(),
         "pools": [{"pool": pool.strip(), "orders": []}],
     }

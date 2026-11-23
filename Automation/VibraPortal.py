@@ -453,41 +453,61 @@ def open_fob_registration(driver: webdriver.Chrome) -> None:
     _install_ajax_monitor(driver)
 
 
-def fill_registration(driver: webdriver.Chrome, pool: str, plate: str, carrier: str) -> Dict[str, str]:
+def fill_registration(driver: webdriver.Chrome, pool: str, plates: List[str], carrier: str) -> Dict[str, str]:
     """Preenche Pool, Placa (+ Buscar) e Transportador na tela de Compartimentação.
-    Devolve o texto das opções efetivamente selecionadas nos combos."""
+    plates = carretas do conjunto, na ordem: se a Vibra recusar uma ("O veículo
+    informado está inválido..."), tenta a próxima. Devolve o texto das opções
+    selecionadas nos combos e a placa aceita."""
     selected_pool = _select_pool(driver, pool)
+
+    refusals = []
+    accepted_plate = ""
+    for plate in plates:
+        plate_errors = _search_plate(driver, plate)
+        if not plate_errors:
+            accepted_plate = plate
+            break
+        refusals.append(f"{plate} (Vibra: {' | '.join(plate_errors)})")
+        print(f"[AVISO] A Vibra recusou a placa {plate}: {' | '.join(plate_errors)}")
+    if not accepted_plate:
+        raise RegistrationError(
+            ("A Vibra recusou as placas " if len(refusals) > 1 else "A Vibra recusou a placa ")
+            + "; ".join(refusals)
+            + ". Confira o cadastro do veículo na Vibra com a central de atendimento ou troque o caminhão da viagem."
+        )
+
+    print(f"[INFO] Transportador: {carrier}")
+    selected_carrier = _select_select2(driver, "cmbTranspp", carrier)
+    _wait_page_ready(driver)
+
+    return {"pool": selected_pool, "carrier": selected_carrier, "plate": accepted_plate}
+
+
+def _search_plate(driver: webdriver.Chrome, plate: str) -> List[str]:
+    """Placa + Buscar. Devolve os alertas de erro da Vibra (vazio = placa aceita)."""
     print(f"[INFO] Placa: {plate}")
     _fill_plate(driver, plate)
-
-    # Alerta antigo na tela seria lido como resposta da placa.
+    # Alerta antigo na tela (inclusive da placa anterior) seria lido como resposta desta.
     _remove_error_messages(driver)
     print("[INFO] Buscar")
     _click(driver, By.XPATH, "//input[@type='submit' and @value='Buscar']")
     _wait_page_ready(driver)
-
-    print(f"[INFO] Transportador: {carrier}")
     try:
         WebDriverWait(driver, SLOW_SCREEN_TIMEOUT).until(
             lambda d: _visible_texts(d, ERROR_MESSAGE_SELECTORS) or d.find_elements(By.ID, "cmbTranspp")
         )
     except TimeoutException as exc:
         raise RegistrationError(
-            f"A Vibra não aceitou a placa {plate}. Confira se o cavalo está cadastrado na Vibra "
+            f"A Vibra não aceitou a placa {plate}. Confira o cadastro do veículo na Vibra "
             "para a BindiLog ou troque o caminhão da viagem.",
             f"combo de transportador não apareceu em {SLOW_SCREEN_TIMEOUT}s após Buscar",
         ) from exc
-    # Ex.: "O veículo informado está inválido, favor entrar em contato com a central de atendimento."
-    plate_errors = _visible_texts(driver, ERROR_MESSAGE_SELECTORS)
-    if plate_errors:
-        raise RegistrationError(
-            f"A Vibra recusou a placa {plate} (Vibra: {' | '.join(plate_errors)}). Confira o cadastro "
-            "do veículo na Vibra com a central de atendimento ou troque o caminhão da viagem."
-        )
-    selected_carrier = _select_select2(driver, "cmbTranspp", carrier)
-    _wait_page_ready(driver)
+    return [_clean_alert_text(text) for text in _visible_texts(driver, ERROR_MESSAGE_SELECTORS)]
 
-    return {"pool": selected_pool, "carrier": selected_carrier}
+
+def _clean_alert_text(text: str) -> str:
+    # O botão de fechar do alerta entra no texto ("X Fechar O veículo informado...").
+    return re.sub(r"^\s*(?:[×xX]\s*)?Fechar\s*", "", text).strip()
 
 
 # Linhas das tabelas da Compartimentação (JSF): "tblRemessas:N:row" e "tblVeiculo:N:row".
