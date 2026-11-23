@@ -53,14 +53,24 @@ def report_registration(
     trip_id: int,
     order_results: List[dict],
     distributor_message: Optional[str] = None,
+    schedule_number: Optional[str] = None,
+    scheduled_time: Optional[str] = None,
 ) -> dict:
     """POST /api/rpa/vibra/programacoes - order_results é uma lista de
-    {"orderId", "registered", "observation"?}. Cadastrado vira 'Registrado na
-    distribuidora' no portal; com erro vira 'Erro no agendamento' com a
-    observação em aberto, e a viagem só volta depois que o usuário alterá-la.
+    {"orderId", "registered", "observation"?, "technicalDetail"?}; schedule_number é o
+    número da Programação FOB na Vibra e scheduled_time ("HH:MM") o horário que a Vibra
+    aceitou (pode ser o livre mais próximo do planejado). O portal grava o resultado só na viagem
+    (o status do pedido não muda): cadastrada sai da fila do agente; com erro fica
+    em aberto até o usuário corrigir a viagem ou pedir "Tentar de novo".
     Levanta RuntimeError (erro do item, não da execução)."""
     url = f"{base_url.rstrip('/')}/api/rpa/vibra/programacoes"
-    payload = {"tripId": trip_id, "distributorMessage": distributor_message or None, "orders": order_results}
+    payload = {
+        "tripId": trip_id,
+        "distributorMessage": distributor_message or None,
+        "distributorReference": schedule_number or None,
+        "scheduledTime": scheduled_time or None,
+        "orders": order_results,
+    }
     try:
         response = requests.post(url, headers=_headers(token), json=payload, timeout=REQUEST_TIMEOUT_SECONDS)
     except requests.RequestException as exc:

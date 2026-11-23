@@ -34,10 +34,16 @@ Bot Python (Selenium) que cadastra **Programação FOB** no **Canal de Negócios
 `C:\Priortec\Bindi - Vibra` (login SSO + 2FA, cookies e DriverFactory reaproveitados de lá).
 
 Fluxo por programação (`Automation/VibraPortal.py`):
-menu lateral > Programação > Programação FOB > Cadastrar > Pesquisar > aguarda a tela de
-Compartimentação (pode demorar minutos) > Pool > Placa > Buscar > Transportador >
-carrega cada remessa no compartimento programado > Continuar > Agendamento (data/hora do
-portal) > Finalizar.
+home (`https://cn.vibraenergia.com.br/home/#/`) > fecha o popup Informativos > ativa a unidade
+fixa `VIBRA_UNIDADE` (padrão `10076 - POSTO ZEPPE SAO JOSE LTDA`: o Pool dela lista todos os
+postos; compara sem acentos e também sem o código "10076 - ") > menu lateral > Programação >
+Programação FOB > Cadastrar > Pesquisar > aguarda a tela de Compartimentação (pode demorar
+minutos) > Pool do 1º posto > Placa > Buscar > Transportador > carrega cada remessa no
+compartimento programado, **trocando o Pool antes dos compartimentos de cada posto** (confere
+que a troca não desfez os já carregados) > Continuar > Agendamento (data/hora do portal; se o horário não estiver livre, o livre mais
+próximo a até `MAX_SCHEDULE_TIME_DIFF_MINUTES` = 60 min, empate = o mais cedo, avisado na
+mensagem ao portal; além disso ou dia sem horário = `RegistrationError`) >
+Finalizar > Protocolo (número da programação).
 
 Base funcional: ER Bindi Log (seções 3, 5.8 e 8.2 + BPMN). O tópico 11 "Fluxo Cadastro de
 Transporte - Distribuidora Vibra" **está vazio** no .docx (V1 1 e V8): só o título, sem as telas.
@@ -62,7 +68,9 @@ com nº na Vibra e status antes de `registered_at_distributor`; `trip.load_date`
                   "items": [ { "orderItemId", "productName", "qtyM3",
                                "compartments": [ { "number", "capacityM3" } ] } ] } ] } ] }
 ```
-O GetDataModule gera **uma programação por viagem + pool** (pedidos do mesmo posto juntos).
+O GetDataModule gera **uma programação por viagem** (todos os postos dela; `order["vibraPool"]`
+= Pool de cada pedido). O histórico (CSV) continua **por viagem + posto**: uma linha por posto com o
+mesmo resultado, e posto já FINALIZADO na viagem fica fora da programação nova (só reenvia o resultado).
 Transportador = `VIBRA_TRANSPORTADOR` (padrão `BINDI`). Overrides para testes: `PLANEJADOS_MOCK_PATH` (JSON no formato acima,
 ex. `planejados.example.json`) e `PROGRAMACOES_PATH` (CSV com colunas `pool`, `placa`, opcional
 `transportador` - sem pedidos, não carrega compartimentos).
@@ -71,13 +79,22 @@ Saída: `programacoes_vibra.csv` (status `FINALIZADO`, `PREENCHIDO` - CSV sem pe
 
 Retorno ao portal: `POST /api/rpa/vibra/programacoes` (`Utils/PortalClient.report_registration`;
 rota em `C:\Priortec\Bindi-PAINEL\app\api\rpa\vibra\programacoes\route.ts`), uma chamada por
-viagem + pool: `{ tripId, distributorMessage?, orders: [{ orderId, registered, observation? }] }`.
-- Cadastrada -> pedido `registered_at_distributor` e a viagem sai de `planejados`.
+viagem + pool: `{ tripId, distributorMessage?, distributorReference?, scheduledTime?, orders: [{ orderId, registered, observation?, technicalDetail? }] }`.
+`distributorReference` = número da programação lido na tela de Protocolo depois do Finalizar.
+`scheduledTime` ("HH:MM") = horário aceito pela Vibra; o portal grava em `trip_loading.distributor_scheduled_time`
+(migração 034, 1º carregamento VIBRA da viagem) e mostra em "Carregamento na distribuidora" (com o planejado riscado
+quando difere). No CSV fica no detail ("Agendado AAAA-MM-DD HH:MM") e é relido para o reenvio.
+O portal grava o resultado **só na viagem** (`order_event.trip_id` + `distributor_reference`,
+migrações 032 e 033 do portal; `lib/rpaTripRegistration.ts`) e **não muda o status do pedido**:
+um pedido dividido em várias viagens é cadastrado viagem a viagem.
+- Cadastrada -> a viagem sai de `planejados` (selo REG e "Prog. nº" no compartimento).
 - `RegistrationError` (VibraPortal: horário indisponível, dia bloqueado, placa/posto não aceitos,
   pedido fora da Lista de Remessas, compartimento inexistente/ocupado/capacidade diferente, recusa no
-  Finalizar) -> pedido `scheduling_error` com `user_message` como observação em aberto. O portal só
-  devolve a viagem depois que o usuário reabrir, corrigir e liberar de novo (`trip.updated_at` mais
-  novo que a nota de erro - `lib/rpaPlannedTrips.ts`), então o erro não repete a cada ciclo.
+  Finalizar) -> erro em aberto na viagem. No quadro de viagens aparece o
+  selo ERRO no compartimento e um quadro com a mensagem, como corrigir, "Detalhes técnicos"
+  (`technicalDetail`) e o botão "Tentar de novo". A viagem só volta para o agente depois que o
+  usuário reabrir, corrigir e liberar (`trip.updated_at` mais novo que o erro) ou clicar "Tentar de
+  novo" (fecha o erro), então o erro não repete a cada ciclo.
 - Erro técnico (`RuntimeError`): tenta de novo nos próximos ciclos; na `MAX_TECHNICAL_ATTEMPTS`ª
   (3) seguida vai ao portal como erro com mensagem genérica de falha técnica.
 - Mock (`PLANEJADOS_MOCK_PATH`) e `PROGRAMACOES_PATH` não enviam nada ao portal.
@@ -95,9 +112,8 @@ HIDRATADO COMBUSTIVEL"), confere capacidade e compartimento vazio, carrega e con
 `items[].qtyM3` é o total do item no pedido, não o da viagem.
 
 **Pendências:**
-- Tela depois do "Finalizar" (mensagem de sucesso/erro da Vibra) não confirmada via DOM:
-  erros procurados em `.alert-danger`/`.ui-messages-error`. Motorista não é informado em
-  nenhuma tela vista até aqui.
+- Tela de erro depois do "Finalizar" não confirmada via DOM: erros procurados em
+  `.alert-danger`/`.ui-messages-error`. Motorista não é informado em nenhuma tela vista até aqui.
 - Saldo insuficiente / produto em análise (ER: reverte para `planned` sem erro) ainda não é
   identificado na Vibra: hoje cai em "pedido não disponível na Lista de Remessas" (`scheduling_error`).
 - Preencher `VIBRA_TOKEN_API_TOKEN` (= `API_TOKEN` do serviço `bindi_email_token_reader` no
@@ -117,7 +133,12 @@ não for aceito, cai no modo manual: código digitado na janela ou gravado em `m
 ### Navegação no portal (seletores do protótipo)
 ```
 Login (SSO)          #username, #password, #loginBt
-Menu lateral         app-menu-item > div.main-item > div.icone-texto > span.titulo
+Popup Informativos   app-informativo-lateral i.md-icons 'close' (fechar antes de usar o menu)
+Unidade ativa        div.dados-cliente span.nome (nome completo no textContent)
+Trocar unidade       i.trigger-grupo-empresa -> div.grupo-empresa (div.razao-social span +
+                     input[type=radio]); div.footer-grupo-empresa button 'Trocar' / 'Cancelar'
+Menu "NOVA HOME"     home-acesso-rapido-lateral; expande clicando em mat-icon.icone-expandir
+Menu lateral antigo  app-menu-item > div.main-item > div.icone-texto > span.titulo
   (Angular)          recolhido = só ícones; expande no hover (span.titulo só existe expandido).
                      Subitens em div.subitem (animação expandCollapse, altura 0 -> auto).
                      'Programação' > 'Programação FOB' > 'Cadastrar' (pode abrir nova aba;
@@ -135,6 +156,8 @@ Agendamento          Bootstrap Datepicker inline #datepickid .datepicker-days: t
                      th.datepicker-switch 'Novembro 2026') - clicar sempre no dia;
                      select#combo_horarios (option value "16:00", texto "06/11/2026 - 16:00",
                      onchange mojarra.ab); a#botao_cria1 'Finalizar'
+Protocolo            'Programação criada com sucesso!' + h2 'Número da Programação : 4041588304 -
+                     19/11/2026 18:15' (vai no detail do CSV como 'Programação Vibra nº N')
 ```
 Timeouts: `VIBRA_TIMEOUT_S` (padrão 30, elementos comuns) e `VIBRA_SLOW_SCREEN_TIMEOUT_S`
 (padrão 600, telas lentas + AJAX). Lidos no import do VibraPortal (que chama `load_dotenv()`

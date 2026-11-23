@@ -5,6 +5,7 @@ não cadastrar de novo na Vibra uma viagem já FINALIZADA."""
 
 import csv
 import os
+import re
 from collections import Counter
 from datetime import datetime
 from typing import Optional
@@ -19,6 +20,13 @@ STATUS_ERROR = "ERRO"
 # viagem e o portal só a devolve depois disso.
 STATUS_ERROR_REPORTED = "ERRO_PORTAL"
 DEFAULT_OUTPUT_PATH = "programacoes_vibra.csv"
+# O número da programação na Vibra vai no "detail" (sem coluna nova, para o CSV
+# acumulado continuar compatível); o GetDataModule o relê para reenviar ao portal.
+SCHEDULE_NUMBER_LABEL = "Programação Vibra nº"
+SCHEDULE_NUMBER_IN_DETAIL = re.compile(re.escape(SCHEDULE_NUMBER_LABEL) + r" (\d+)")
+# Horário aceito pela Vibra (pode ser o livre mais próximo do planejado): "Agendado 2026-11-20 13:30".
+SCHEDULED_LABEL = "Agendado"
+SCHEDULED_TIME_IN_DETAIL = re.compile(re.escape(SCHEDULED_LABEL) + r" \d{4}-\d{2}-\d{2} (\d{2}:\d{2})")
 
 
 def output_path() -> str:

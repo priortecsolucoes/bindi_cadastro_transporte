@@ -1,6 +1,7 @@
 """GET_DATA — programações a registrar no Canal de Negócios (Programação FOB):
 por padrão, as viagens planejadas no Portal Bindi Log, uma programação por
-viagem + posto (pool). Overrides para testes: PLANEJADOS_MOCK_PATH (JSON no
+viagem (compartimentos de postos diferentes entram na mesma programação, trocando
+o Pool na Vibra). O histórico continua por viagem + posto. Overrides para testes: PLANEJADOS_MOCK_PATH (JSON no
 mesmo formato da resposta do portal - simula viagens planejadas) e
 PROGRAMACOES_PATH (CSV local, colunas pool, placa e opcionalmente transportador).
 Nunca escreve."""
@@ -12,18 +13,20 @@ from typing import Dict, List, Optional
 
 from Framework.InitModule import BotConfig
 from Framework.RPAFrameworkException import RPAFrameworkException
-from Log.LogModule import STATUS_ERROR, STATUS_ERROR_REPORTED, STATUS_FINALIZED, output_path
+from Log.LogModule import SCHEDULE_NUMBER_IN_DETAIL, SCHEDULED_TIME_IN_DETAIL, STATUS_ERROR, STATUS_ERROR_REPORTED, STATUS_FINALIZED, output_path
 from Utils.PortalClient import fetch_planned_trips
 
 REQUIRED_CSV_COLUMNS = ("pool", "placa")
 
 
 def get_data(config: BotConfig) -> List[dict]:
-    """Cada item tem "pool", "plate" e "carrier"; itens do portal também trazem
+    """Cada item tem "pool" (postos da programação, para o log), "pools"
+    ([{"pool", "orders"}] - um por posto), "plate" e "carrier"; itens do portal também trazem
     "tripId", "loadDate", "loadTime", "trailerPlates", "driverName", "driverTaxId",
-    "orders" (pedidos do posto na viagem, com itens e compartimentos),
-    "reportToPortal" (False no mock), "technicalErrors" (erros técnicos seguidos
-    no histórico) e, se já cadastrada na Vibra, "alreadyFinalized"."""
+    "orders" (pedidos da viagem, com itens, compartimentos e "vibraPool"),
+    "reportToPortal" (False no mock) e "technicalErrors" (erros técnicos seguidos
+    no histórico). Posto já FINALIZADO na viagem vem num item próprio, com
+    "alreadyFinalized" e "scheduleNumber", só para reenviar o resultado ao portal."""
     if config.schedules_path:
         return _load_from_csv(config.schedules_path, config.carrier)
 
@@ -39,7 +42,7 @@ def get_data(config: BotConfig) -> List[dict]:
             if not pool:
                 print(f"[AVISO] Viagem {trip.get('tripId')}, pedido {order.get('orderNumber')}: portal não informou o posto - ignorado.")
                 continue
-            orders_by_pool.setdefault(pool, []).append(order)
+            orders_by_pool.setdefault(pool, []).append({**order, "vibraPool": pool})
 
         for pool, orders in orders_by_pool.items():
             items.append(
@@ -52,6 +55,7 @@ def get_data(config: BotConfig) -> List[dict]:
                     "driverName": trip.get("driverName"),
                     "driverTaxId": trip.get("driverTaxId"),
                     "orders": orders,
+                    "pools": [{"pool": pool, "orders": orders}],
                 }
             )
 
@@ -59,6 +63,7 @@ def get_data(config: BotConfig) -> List[dict]:
     history = _load_history(history_path)
     from_portal = not config.planned_mock_path
     pending: List[dict] = []
+    trips_to_register: Dict[str, dict] = {}
     finalized_count = 0
     for item in items:
         key_history = history.get(_item_key(item["tripId"], item["pool"]), {})
@@ -71,7 +76,12 @@ def get_data(config: BotConfig) -> List[dict]:
             # Já está na Vibra, mas o portal ainda devolve a viagem: o retorno anterior
             # não chegou. Só reenvia o resultado - cadastrar de novo duplicaria na Vibra.
             item["alreadyFinalized"] = True
-        pending.append(item)
+            item["scheduleNumber"] = key_history.get("schedule_number", "")
+            item["scheduledTime"] = key_history.get("scheduled_time", "")
+            pending.append(item)
+            continue
+        _merge_into_trip(trips_to_register, item)
+    pending.extend(trips_to_register.values())
 
     if finalized_count:
         action = "só o resultado será reenviado ao portal" if from_portal else "ignorada(s)"
@@ -79,8 +89,20 @@ def get_data(config: BotConfig) -> List[dict]:
             f"[INFO] {finalized_count} programação(ões) já FINALIZADA(S) na Vibra - {action} "
             f"(histórico em {history_path})."
         )
-    print(f"[OK] {len(pending) - (finalized_count if from_portal else 0)} programação(ões) a registrar na Vibra.")
+    print(f"[OK] {len(trips_to_register)} programação(ões) a registrar na Vibra.")
     return pending
+
+
+def _merge_into_trip(trips: Dict[str, dict], item: dict) -> None:
+    """Junta os postos ainda não finalizados da mesma viagem numa programação só."""
+    trip = trips.get(str(item["tripId"]))
+    if trip is None:
+        trips[str(item["tripId"])] = {**item, "pools": list(item["pools"]), "orders": list(item["orders"])}
+        return
+    trip["pools"].extend(item["pools"])
+    trip["orders"].extend(item["orders"])
+    trip["pool"] = " / ".join(part["pool"] for part in trip["pools"])
+    trip["technicalErrors"] = max(trip["technicalErrors"], item["technicalErrors"])
 
 
 def _item_key(trip_id, pool: str) -> tuple:
@@ -106,6 +128,12 @@ def _load_history(history_path: str) -> Dict[tuple, dict]:
                 status = row.get("status")
                 if status == STATUS_FINALIZED:
                     entry["finalized"] = True
+                    number = SCHEDULE_NUMBER_IN_DETAIL.search(row.get("detail") or "")
+                    if number:
+                        entry["schedule_number"] = number.group(1)
+                    scheduled = SCHEDULED_TIME_IN_DETAIL.search(row.get("detail") or "")
+                    if scheduled:
+                        entry["scheduled_time"] = scheduled.group(1)
                 elif status == STATUS_ERROR:
                     entry["technical_errors"] += 1
                 elif status == STATUS_ERROR_REPORTED:
@@ -167,4 +195,5 @@ def _build_item(pool: str, plate: str, carrier: Optional[str]) -> dict:
         "pool": pool.strip(),
         "plate": plate.strip().upper().replace("-", ""),
         "carrier": (carrier or "").strip(),
+        "pools": [{"pool": pool.strip(), "orders": []}],
     }

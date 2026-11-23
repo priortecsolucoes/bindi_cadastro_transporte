@@ -12,6 +12,7 @@ from Utils.DriverFactory import resolve_chrome_binary
 from Utils.TokenApiClient import check_health
 
 DEFAULT_TOKEN_API_URL = "https://emailtokenreader.up.railway.app"
+DEFAULT_COMPANY = "10076 - POSTO ZEPPE SAO JOSE LTDA"
 
 
 @dataclass
@@ -27,6 +28,7 @@ class BotConfig:
     schedules_path: Optional[str]
     planned_mock_path: Optional[str]
     carrier: str
+    company: str
     mfa_wait_seconds: int
     token_api_url: Optional[str]
     token_api_token: Optional[str]
@@ -63,6 +65,9 @@ def initialize() -> BotConfig:
 
     # A transportadora é sempre a própria Bindi Log - só muda se o nome no combo da Vibra mudar.
     carrier = os.environ.get("VIBRA_TRANSPORTADOR", "").strip() or "BINDI"
+    # Unidade com o Pool que reúne todos os postos atendidos: a programação inteira
+    # (compartimentos de postos diferentes) é feita nela, trocando só o Pool.
+    company = os.environ.get("VIBRA_UNIDADE", "").strip() or DEFAULT_COMPANY
 
     portal_api_url = os.environ.get("PORTAL_API_URL", "").strip()
     portal_api_token = os.environ.get("PORTAL_API_TOKEN", "").strip()
@@ -143,6 +148,7 @@ def initialize() -> BotConfig:
         schedules_path=schedules_path,
         planned_mock_path=planned_mock_path,
         carrier=carrier,
+        company=company,
         mfa_wait_seconds=mfa_wait_seconds,
         token_api_url=token_api_url,
         token_api_token=token_api_token,

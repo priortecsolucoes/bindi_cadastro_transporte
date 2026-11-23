@@ -9,7 +9,7 @@ import os
 import re
 import time
 import unicodedata
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
 from selenium import webdriver
@@ -23,10 +23,11 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import Select, WebDriverWait
+from urllib3.exceptions import ReadTimeoutError
 
 from Utils.TokenApiClient import fetch_token, prepare_token
 
-START_URL = "https://cn.vibraenergia.com.br/consultar-pedidos/"
+HOME_URL = "https://cn.vibraenergia.com.br/home/#/"
 
 DEFAULT_TIMEOUT_ENV = "VIBRA_TIMEOUT_S"
 SLOW_SCREEN_TIMEOUT_ENV = "VIBRA_SLOW_SCREEN_TIMEOUT_S"
@@ -45,21 +46,47 @@ DEFAULT_TIMEOUT = _env_seconds(DEFAULT_TIMEOUT_ENV, 30)
 # A tela após "Pesquisar" (e as seguintes) às vezes demora bastante.
 SLOW_SCREEN_TIMEOUT = _env_seconds(SLOW_SCREEN_TIMEOUT_ENV, 600)
 MFA_CODE_FILE = "mfa_code.txt"
+# Enquanto a tela lenta carrega, o chromedriver segura os comandos e o Selenium desiste
+# da resposta em 120s (ReadTimeoutError) - o navegador segue carregando, então a espera continua.
+SLOW_SCREEN_IGNORED_ERRORS = (ReadTimeoutError, TimeoutException)
+MAX_LOGGED_COMBO_OPTIONS = 40
 
 # Menu lateral (Angular): recolhido mostra só ícones; os títulos (span.titulo) só
 # entram no DOM quando o menu expande com o mouse em cima (hover).
-MENU_BUTTON_SELECTOR = "app-menu-item"
+# Há dois layouts: o antigo (app-menu-item, expande com hover) e a "NOVA HOME"
+# (home-acesso-rapido-lateral, expande clicando em mat-icon.icone-expandir).
+MENU_SELECTOR = "app-menu-item, home-acesso-rapido-lateral"
+LEGACY_MENU_ICON_SELECTOR = "app-menu-item div.main-item"
+MENU_EXPAND_BUTTON_SELECTOR = "home-acesso-rapido-lateral mat-icon.icone-expandir"
 MENU_NAV_ATTEMPTS = 3
 MENU_ITEM_XPATH = (
     "//app-menu-item//div[contains(@class,'main-item')]"
     "[.//span[contains(@class,'titulo')][normalize-space()='{title}']]"
+    " | //home-acesso-rapido-lateral//*[normalize-space(text())='{title}']"
 )
 # Estrutura do item "Cadastrar" não confirmada via DOM - aceita item do menu ou link com o texto.
 MENU_LEAF_XPATH = (
     "//app-menu-item//*[self::a or self::span or self::div or self::button]"
     "[normalize-space()='{title}'][not(*[normalize-space()='{title}'])]"
+    " | //home-acesso-rapido-lateral//*[normalize-space(text())='{title}']"
 )
 PLATE_INPUT_XPATH = "//input[@value='Buscar']/ancestor::div[1]//input[@type='text']"
+
+# Popup "Informativos" que a home abre por cima de tudo.
+POPUP_CLOSE_XPATH = "//app-informativo-lateral//i[contains(@class,'md-icons')][normalize-space()='close']"
+POPUP_WAIT_SECONDS = 10
+
+# Unidade (empresa do grupo) ativa no cabeçalho e diálogo "Outras empresas do grupo":
+# um mesmo login enxerga várias unidades, e as remessas dependem da unidade ativa.
+CURRENT_COMPANY_SELECTOR = "div.dados-cliente span.nome"
+COMPANY_SWITCH_TRIGGER_SELECTOR = "i.trigger-grupo-empresa"
+COMPANY_OPTION_SELECTOR = "div.grupo-empresa"
+COMPANY_OPTION_NAME_SELECTOR = "div.razao-social span"
+COMPANY_FOOTER_BUTTON_XPATH = "//div[contains(@class,'footer-grupo-empresa')]//button[normalize-space()='{text}']"
+COMPANY_SWITCH_TIMEOUT = 60
+# Login com uma única unidade não mostra a seta de troca.
+COMPANY_TRIGGER_WAIT_SECONDS = 10
+SHIPMENT_LIST_WAIT_SECONDS = 10
 
 
 class RegistrationError(RuntimeError):
@@ -92,18 +119,18 @@ def login(
     API, ou se o código não chegar, aguarda até mfa_wait_seconds para o usuário
     digitá-lo na janela do Chrome ou gravá-lo em MFA_CODE_FILE."""
     print("[INFO] Acessando o Canal de Negócios Vibra...")
-    driver.get(START_URL)
+    driver.get(HOME_URL)
 
     try:
         WebDriverWait(driver, timeout).until(
-            lambda d: d.find_elements(By.CSS_SELECTOR, MENU_BUTTON_SELECTOR) or d.find_elements(By.ID, "username")
+            lambda d: d.find_elements(By.CSS_SELECTOR, MENU_SELECTOR) or d.find_elements(By.ID, "username")
         )
     except TimeoutException as exc:
         raise RuntimeError(
             f"Nem a tela de login nem o menu do portal apareceram em {timeout}s. {_page_summary(driver)}"
         ) from exc
 
-    if driver.find_elements(By.CSS_SELECTOR, MENU_BUTTON_SELECTOR):
+    if driver.find_elements(By.CSS_SELECTOR, MENU_SELECTOR):
         print("[OK] Sessão do SSO reaproveitada - login não foi necessário.")
         return
 
@@ -121,7 +148,7 @@ def login(
 
     try:
         WebDriverWait(driver, timeout).until(
-            lambda d: d.find_elements(By.CSS_SELECTOR, MENU_BUTTON_SELECTOR) or _is_mfa_screen(d)
+            lambda d: d.find_elements(By.CSS_SELECTOR, MENU_SELECTOR) or _is_mfa_screen(d)
         )
     except TimeoutException as exc:
         raise RuntimeError(
@@ -161,7 +188,7 @@ def _submit_mfa_code_from_api(
     if not _submit_mfa_code(driver, code):
         return False
     try:
-        WebDriverWait(driver, timeout).until(lambda d: d.find_elements(By.CSS_SELECTOR, MENU_BUTTON_SELECTOR))
+        WebDriverWait(driver, timeout).until(lambda d: d.find_elements(By.CSS_SELECTOR, MENU_SELECTOR))
     except TimeoutException:
         print(f"[AVISO] Código de 2FA {code} não foi aceito (menu não carregou). Passando para o modo manual.")
         return False
@@ -175,7 +202,7 @@ def _wait_manual_mfa_code(driver: webdriver.Chrome, mfa_wait_seconds: int) -> No
     )
     try:
         WebDriverWait(driver, mfa_wait_seconds, poll_frequency=2).until(
-            lambda d: _try_mfa_code_file(d) or d.find_elements(By.CSS_SELECTOR, MENU_BUTTON_SELECTOR)
+            lambda d: _try_mfa_code_file(d) or d.find_elements(By.CSS_SELECTOR, MENU_SELECTOR)
         )
     except TimeoutException as exc:
         raise RuntimeError(f"Código de 2FA não informado (ou inválido) em {mfa_wait_seconds}s.") from exc
@@ -229,19 +256,143 @@ def _is_mfa_screen(driver: webdriver.Chrome) -> bool:
 
 
 # --------------------------------------------------------------------------
-# Programação FOB > Cadastrar
+# Home e unidade (empresa do grupo) ativa
 # --------------------------------------------------------------------------
-def open_fob_registration(driver: webdriver.Chrome, main_handle: str) -> None:
-    """Parte sempre da tela inicial (fecha abas de itens anteriores) e chega à
-    tela de Compartimentação: menu > Programação > Programação FOB > Cadastrar
-    > Pesquisar."""
+def go_home(driver: webdriver.Chrome, main_handle: str) -> None:
+    """Fecha as abas de tentativas anteriores, volta à home e fecha o popup
+    'Informativos', que reabre a cada visita e bloqueia o menu."""
     for handle in driver.window_handles:
         if handle != main_handle:
             driver.switch_to.window(handle)
             driver.close()
     driver.switch_to.window(main_handle)
-    driver.get(START_URL)
+    driver.get(HOME_URL)
+    try:
+        WebDriverWait(driver, DEFAULT_TIMEOUT).until(EC.presence_of_element_located((By.CSS_SELECTOR, MENU_SELECTOR)))
+    except TimeoutException as exc:
+        raise RuntimeError(f"Home da Vibra não carregou em {DEFAULT_TIMEOUT}s. {_page_summary(driver)}") from exc
+    _close_informative_popup(driver)
 
+
+def _close_informative_popup(driver: webdriver.Chrome) -> None:
+    """O popup aparece alguns segundos depois da home; sem informativo pendente ele não aparece."""
+    try:
+        close_icon = WebDriverWait(driver, POPUP_WAIT_SECONDS, poll_frequency=0.5).until(
+            lambda d: _first_visible(d, POPUP_CLOSE_XPATH)
+        )
+    except TimeoutException:
+        return
+    _scroll_and_click(driver, close_icon)
+    try:
+        WebDriverWait(driver, DEFAULT_TIMEOUT).until(lambda d: not _first_visible(d, POPUP_CLOSE_XPATH))
+    except TimeoutException as exc:
+        raise RuntimeError("Popup 'Informativos' da home não fechou após clicar no X.") from exc
+    print("[INFO] Popup 'Informativos' fechado.")
+
+
+def select_company(driver: webdriver.Chrome, company_name: str) -> str:
+    """Deixa ativa a unidade company_name (VIBRA_UNIDADE; precisa estar na home).
+    O diálogo de troca pode mostrar só o nome, sem o código ("10076 - "), então
+    compara também sem ele. Devolve a unidade ativa."""
+    names = list(dict.fromkeys([company_name.strip(), company_name.split(" - ", 1)[-1].strip()]))
+    current = read_current_company(driver)
+    if _matching_company([current], names):
+        print(f"[INFO] Unidade ativa na Vibra: {current}")
+        return current
+
+    target = _switch_company(driver, lambda options: _matching_company(options, names))
+    if target:
+        return target
+    raise RuntimeError(
+        f"Unidade '{company_name}' não encontrada entre as unidades da Vibra deste login "
+        f"(ativa: {current}). Confira VIBRA_UNIDADE."
+    )
+
+
+def read_current_company(driver: webdriver.Chrome) -> str:
+    try:
+        return WebDriverWait(driver, DEFAULT_TIMEOUT).until(_current_company_or_empty)
+    except TimeoutException as exc:
+        raise RuntimeError(f"Unidade ativa não encontrada no cabeçalho da Vibra. {_page_summary(driver)}") from exc
+
+
+def _matching_company(company_names: List[str], station_names: List[str]) -> Optional[str]:
+    """Os nomes do posto vêm do mais específico para o mais genérico; compara sem acentos."""
+    for station_name in station_names:
+        wanted = _normalize_text(station_name)
+        for company_name in company_names:
+            if wanted and wanted in _normalize_text(company_name):
+                return company_name
+    return None
+
+
+def _normalize_text(text: str) -> str:
+    plain = unicodedata.normalize("NFKD", text or "").encode("ascii", "ignore").decode().upper()
+    return " ".join(plain.split())
+
+
+def _switch_company(driver: webdriver.Chrome, choose_company) -> Optional[str]:
+    """Abre 'Outras empresas do grupo' e troca para a unidade que choose_company
+    escolher entre os nomes listados. Sem escolha, cancela o diálogo e devolve None."""
+    try:
+        trigger = WebDriverWait(driver, COMPANY_TRIGGER_WAIT_SECONDS).until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, COMPANY_SWITCH_TRIGGER_SELECTOR))
+        )
+    except TimeoutException:
+        print("[INFO] Login sem outras unidades na Vibra (seta de troca não apareceu).")
+        return None
+    _scroll_and_click(driver, trigger)
+    try:
+        WebDriverWait(driver, DEFAULT_TIMEOUT).until(
+            lambda d: [o for o in d.find_elements(By.CSS_SELECTOR, COMPANY_OPTION_SELECTOR) if o.is_displayed()]
+        )
+    except TimeoutException as exc:
+        raise RuntimeError("Diálogo 'Outras empresas do grupo' não abriu após clicar na seta.") from exc
+
+    options = {}
+    for option in driver.find_elements(By.CSS_SELECTOR, COMPANY_OPTION_SELECTOR):
+        names = option.find_elements(By.CSS_SELECTOR, COMPANY_OPTION_NAME_SELECTOR)
+        # textContent: o nome aparece truncado ("...") na tela, mas o texto completo está no DOM.
+        name = (names[0].get_attribute("textContent") or "").strip() if names else ""
+        if name:
+            options[name] = option
+
+    target = choose_company(list(options))
+    button_text = "Trocar" if target else "Cancelar"
+    if target:
+        radio = options[target].find_element(By.CSS_SELECTOR, "input[type=radio]")
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'}); arguments[0].click();", radio)
+        print(f"[INFO] Trocando para a unidade {target}...")
+    _click(driver, By.XPATH, COMPANY_FOOTER_BUTTON_XPATH.format(text=button_text))
+    if not target:
+        return None
+
+    try:
+        WebDriverWait(driver, COMPANY_SWITCH_TIMEOUT).until(
+            lambda d: _normalize_text(target) in _normalize_text(_current_company_or_empty(d))
+        )
+    except TimeoutException as exc:
+        raise RuntimeError(
+            f"Troca para a unidade {target} não confirmada em {COMPANY_SWITCH_TIMEOUT}s "
+            f"(cabeçalho mostra '{_current_company_or_empty(driver)}')."
+        ) from exc
+    return target
+
+
+def _current_company_or_empty(driver: webdriver.Chrome) -> str:
+    try:
+        elements = driver.find_elements(By.CSS_SELECTOR, CURRENT_COMPANY_SELECTOR)
+        return (elements[0].get_attribute("textContent") or "").strip() if elements else ""
+    except StaleElementReferenceException:
+        return ""
+
+
+# --------------------------------------------------------------------------
+# Programação FOB > Cadastrar
+# --------------------------------------------------------------------------
+def open_fob_registration(driver: webdriver.Chrome) -> None:
+    """Parte da home e chega à tela de Compartimentação: menu > Programação >
+    Programação FOB > Cadastrar > Pesquisar."""
     print("[INFO] Menu > Programação > Programação FOB > Cadastrar")
     # O menu recolhe sozinho se o hover "escapar" (animação, re-render do Angular):
     # cada passo confere o menu e a navegação inteira é refeita se ele fechar no meio.
@@ -265,7 +416,7 @@ def open_fob_registration(driver: webdriver.Chrome, main_handle: str) -> None:
 
     print("[INFO] Pesquisa de Remessas > Pesquisar")
     try:
-        WebDriverWait(driver, SLOW_SCREEN_TIMEOUT).until(
+        WebDriverWait(driver, SLOW_SCREEN_TIMEOUT, ignored_exceptions=SLOW_SCREEN_IGNORED_ERRORS).until(
             EC.presence_of_element_located((By.ID, "forumlarioPesquisa:comboBase"))
         )
     except TimeoutException as exc:
@@ -282,13 +433,18 @@ def open_fob_registration(driver: webdriver.Chrome, main_handle: str) -> None:
             False,
         )
     )
-    search_button.click()
+    # O chromedriver só responde ao clique quando a próxima tela termina de carregar, que pode
+    # passar do timeout HTTP do Selenium. O clique já foi feito; a espera abaixo continua.
+    try:
+        driver.execute_script("var button = arguments[0]; setTimeout(function () { button.click(); }, 0);", search_button)
+    except SLOW_SCREEN_IGNORED_ERRORS:
+        print("[INFO] 'Pesquisar' clicado; a Vibra ainda está carregando a próxima tela.")
 
     print("[INFO] Aguardando a tela de Compartimentação (pode demorar)...")
     try:
-        WebDriverWait(driver, SLOW_SCREEN_TIMEOUT, poll_frequency=1).until(
-            EC.presence_of_element_located((By.ID, "comboPool"))
-        )
+        WebDriverWait(
+            driver, SLOW_SCREEN_TIMEOUT, poll_frequency=1, ignored_exceptions=SLOW_SCREEN_IGNORED_ERRORS
+        ).until(EC.presence_of_element_located((By.ID, "comboPool")))
     except TimeoutException as exc:
         raise RuntimeError(
             f"Tela de Compartimentação não carregou em {SLOW_SCREEN_TIMEOUT}s após 'Pesquisar'."
@@ -300,19 +456,12 @@ def open_fob_registration(driver: webdriver.Chrome, main_handle: str) -> None:
 def fill_registration(driver: webdriver.Chrome, pool: str, plate: str, carrier: str) -> Dict[str, str]:
     """Preenche Pool, Placa (+ Buscar) e Transportador na tela de Compartimentação.
     Devolve o texto das opções efetivamente selecionadas nos combos."""
-    print(f"[INFO] Pool: {pool}")
-    selected_pool = _select_select2(
-        driver, "comboPool", pool,
-        not_found_message=(
-            f"Posto '{pool}' não encontrado no Pool da Programação FOB da Vibra. Confira o nome do posto "
-            "na distribuidora (cadastro do posto) ou se a Vibra liberou esse posto para a BindiLog."
-        ),
-    )
-    _wait_page_ready(driver)
-
+    selected_pool = _select_pool(driver, pool)
     print(f"[INFO] Placa: {plate}")
     _fill_plate(driver, plate)
 
+    # Alerta antigo na tela seria lido como resposta da placa.
+    _remove_error_messages(driver)
     print("[INFO] Buscar")
     _click(driver, By.XPATH, "//input[@type='submit' and @value='Buscar']")
     _wait_page_ready(driver)
@@ -320,7 +469,7 @@ def fill_registration(driver: webdriver.Chrome, pool: str, plate: str, carrier: 
     print(f"[INFO] Transportador: {carrier}")
     try:
         WebDriverWait(driver, SLOW_SCREEN_TIMEOUT).until(
-            EC.presence_of_element_located((By.ID, "cmbTranspp"))
+            lambda d: _visible_texts(d, ERROR_MESSAGE_SELECTORS) or d.find_elements(By.ID, "cmbTranspp")
         )
     except TimeoutException as exc:
         raise RegistrationError(
@@ -328,6 +477,13 @@ def fill_registration(driver: webdriver.Chrome, pool: str, plate: str, carrier: 
             "para a BindiLog ou troque o caminhão da viagem.",
             f"combo de transportador não apareceu em {SLOW_SCREEN_TIMEOUT}s após Buscar",
         ) from exc
+    # Ex.: "O veículo informado está inválido, favor entrar em contato com a central de atendimento."
+    plate_errors = _visible_texts(driver, ERROR_MESSAGE_SELECTORS)
+    if plate_errors:
+        raise RegistrationError(
+            f"A Vibra recusou a placa {plate} (Vibra: {' | '.join(plate_errors)}). Confira o cadastro "
+            "do veículo na Vibra com a central de atendimento ou troque o caminhão da viagem."
+        )
     selected_carrier = _select_select2(driver, "cmbTranspp", carrier)
     _wait_page_ready(driver)
 
@@ -346,30 +502,59 @@ VEHICLE_ROWS_XPATH = (
 # "Todos (completar)" não tem esse title.
 LOAD_COMPARTMENT_XPATH = ".//a[contains(@title,'Carregar neste compartimento')]"
 CONTINUE_BUTTON_XPATH = "//a[contains(@class,'btn-primary')][normalize-space()='Continuar']"
+POOL_NOT_FOUND_MESSAGE = (
+    "Posto '{pool}' não encontrado no Pool da Programação FOB da Vibra (unidade VIBRA_UNIDADE). Confira o "
+    "nome do posto na distribuidora (cadastro do posto) ou se a Vibra liberou esse posto para a BindiLog."
+)
 
 
-def load_compartments(driver: webdriver.Chrome, orders: List[dict]) -> List[str]:
+def load_compartments(
+    driver: webdriver.Chrome, orders: List[dict], current_pool: str
+) -> Tuple[List[str], Dict[str, str]]:
     """Carrega cada remessa no compartimento definido na programação do portal e
-    clica em Continuar. Na Vibra cada compartimento é carregado cheio, então o
-    volume alocado é a própria capacidade (igual ao portal Bindi Log).
-    Devolve um resumo por compartimento ("C5 0265807114 ETANOL ... 3 m³")."""
+    clica em Continuar. Compartimentos de postos diferentes vão na mesma
+    programação: antes de cada posto troca o Pool (order["vibraPool"]), que muda
+    a Lista de Remessas sem desfazer o Carregamento do Veículo. Na Vibra cada
+    compartimento é carregado cheio, então o volume alocado é a própria
+    capacidade (igual ao portal Bindi Log).
+    Devolve um resumo por compartimento ("C5 0265807114 ETANOL ... 3 m³") e o
+    texto do Pool selecionado para cada posto trocado."""
     allocations = [
-        (order["distributorOrderNumber"], item["productName"], compartment["number"], compartment["capacityM3"])
+        (
+            order.get("vibraPool") or current_pool,
+            order["distributorOrderNumber"],
+            item["productName"],
+            compartment["number"],
+            compartment["capacityM3"],
+        )
         for order in orders
         for item in order.get("items", [])
         for compartment in item.get("compartments", [])
     ]
     if not allocations:
-        raise RegistrationError("A viagem não tem nenhum compartimento alocado para os pedidos deste posto.")
+        raise RegistrationError("A viagem não tem nenhum compartimento alocado para os pedidos da Vibra.")
+    # Um posto por vez (menos trocas de Pool), na ordem dos compartimentos.
+    pool_order = list(dict.fromkeys(a[0] for a in sorted(allocations, key=lambda a: a[3])))
+    allocations.sort(key=lambda a: (pool_order.index(a[0]), a[3]))
 
     _install_ajax_monitor(driver)
     summary: List[str] = []
-    for order_number, product_name, compartment_number, capacity_m3 in sorted(allocations, key=lambda a: a[2]):
-        print(f"[INFO] Compartimento {compartment_number}: {product_name} {capacity_m3:g} m³ (ordem {order_number})")
+    selected_pools: Dict[str, str] = {}
+    loaded: List[Tuple[int, str]] = []
+    for pool, order_number, product_name, compartment_number, capacity_m3 in allocations:
+        if pool != current_pool:
+            selected_pools[pool] = _select_pool(driver, pool)
+            _check_still_loaded(driver, loaded, pool)
+            current_pool = pool
+        print(
+            f"[INFO] Compartimento {compartment_number}: {product_name} {capacity_m3:g} m³ "
+            f"(ordem {order_number}, posto {pool})"
+        )
         vehicle_row = _find_vehicle_row(driver, compartment_number)
         if _same_order_number(_vehicle_row_order(vehicle_row), order_number):
             print(f"[INFO] Compartimento {compartment_number} já carregado com a ordem {order_number} - mantido.")
             summary.append(f"C{compartment_number} {order_number} (já carregado)")
+            loaded.append((compartment_number, order_number))
             continue
         _check_vehicle_row_free(vehicle_row, compartment_number, capacity_m3)
 
@@ -384,6 +569,7 @@ def load_compartments(driver: webdriver.Chrome, orders: List[dict]) -> List[str]
             )
         print(f"[OK] Compartimento {compartment_number} carregado: {shipment_product} (ordem {order_number}).")
         summary.append(f"C{compartment_number} {order_number} {shipment_product} {capacity_m3:g} m³")
+        loaded.append((compartment_number, order_number))
 
     print("[INFO] Carregamento do Veículo > Continuar")
     try:
@@ -394,7 +580,25 @@ def load_compartments(driver: webdriver.Chrome, orders: List[dict]) -> List[str]
         raise RuntimeError(f"Botão 'Continuar' do Carregamento do Veículo não apareceu em {DEFAULT_TIMEOUT}s.") from exc
     _scroll_and_click(driver, continue_button)
     _wait_page_ready(driver)
-    return summary
+    return summary, selected_pools
+
+
+def _select_pool(driver: webdriver.Chrome, pool: str) -> str:
+    print(f"[INFO] Pool: {pool}")
+    selected = _select_select2(driver, "comboPool", pool, not_found_message=POOL_NOT_FOUND_MESSAGE.format(pool=pool))
+    _wait_page_ready(driver)
+    return selected
+
+
+def _check_still_loaded(driver: webdriver.Chrome, loaded: List[Tuple[int, str]], pool: str) -> None:
+    """Trocar o Pool não pode desfazer os compartimentos já carregados."""
+    for compartment_number, order_number in loaded:
+        order_on_screen = _vehicle_row_order(_find_vehicle_row(driver, compartment_number))
+        if not _same_order_number(order_on_screen, order_number):
+            raise RuntimeError(
+                f"Ao trocar o Pool para {pool}, o compartimento {compartment_number} perdeu a ordem "
+                f"{order_number} na Vibra (na tela: {order_on_screen or 'vazio'})."
+            )
 
 
 SCHEDULE_TIME_SELECT_ID = "combo_horarios"
@@ -405,16 +609,23 @@ CALENDAR_MONTH_NAMES = [
     "JANEIRO", "FEVEREIRO", "MARCO", "ABRIL", "MAIO", "JUNHO",
     "JULHO", "AGOSTO", "SETEMBRO", "OUTUBRO", "NOVEMBRO", "DEZEMBRO",
 ]
-SEARCH_TIMES_XPATH = "//a[normalize-space()='Pesquisar Horários']"
+# Horário planejado indisponível: aceita o livre mais próximo até esta diferença.
+MAX_SCHEDULE_TIME_DIFF_MINUTES = 60
+SEARCH_TIMES_XPATH ="//a[normalize-space()='Pesquisar Horários']"
 ERROR_MESSAGE_SELECTORS = ".alert-danger, .ui-messages-error, .ui-message-error, #mensagens .erro"
 MESSAGE_SELECTORS = "#mensagens, .alert, .ui-messages, .ui-growl-message"
+# Tela "Programação de Caminhão - Protocolo" depois do Finalizar:
+# h2 "Número da Programação : 4041588304 - 19/11/2026 18:15" (confirmado via DOM).
+SCHEDULE_NUMBER_PATTERN = re.compile(r"N[úu]mero da Programa[çc][ãa]o\s*:\s*(\d+)", re.IGNORECASE)
 
 
-def schedule_and_finalize(driver: webdriver.Chrome, load_date: str, load_time: str) -> str:
+def schedule_and_finalize(driver: webdriver.Chrome, load_date: str, load_time: str) -> Tuple[str, str, str]:
     """Tela "Programação de Caminhão - Agendamento": escolhe no combo de horários a
     opção com a data e a hora de carregamento da programação do portal
-    (loadDate "AAAA-MM-DD", loadTime "HH:MM") e clica em Finalizar. Devolve a
-    mensagem que a Vibra mostrar depois (ou "")."""
+    (loadDate "AAAA-MM-DD", loadTime "HH:MM") - ou o horário livre mais próximo, a até
+    MAX_SCHEDULE_TIME_DIFF_MINUTES - e clica em Finalizar. Devolve o número da
+    programação na Vibra (tela de Protocolo; "" se não for lido), a mensagem
+    (com o aviso de horário ajustado) e o horário agendado."""
     year, month, day = load_date.split("-")
     wanted_text = f"{day}/{month}/{year} - {load_time}"
     print(f"[INFO] Agendamento: data e hora do carregamento {wanted_text}")
@@ -430,15 +641,30 @@ def schedule_and_finalize(driver: webdriver.Chrome, load_date: str, load_time: s
 
     _select_calendar_day(driver, int(year), int(month), int(day), wanted_text)
 
+    adjustment_note = ""
     option = _schedule_option(driver, wanted_text)
     if not option:
         date_prefix = wanted_text.split(" - ")[0]
         free_times = [text.split(" - ")[-1] for text in _schedule_option_texts(driver) if text.startswith(date_prefix)]
-        raise RegistrationError(
-            f"Horário {load_time} de {date_prefix} indisponível na Vibra. "
-            + (f"Horários livres no dia: {', '.join(free_times)}." if free_times else "Nenhum horário livre no dia.")
-            + " Ajuste o horário do carregamento VIBRA na viagem."
-        )
+        vibra_errors = _visible_texts(driver, ERROR_MESSAGE_SELECTORS)
+        if not free_times:
+            raise RegistrationError(
+                f"Nenhum horário disponível na Vibra para {date_prefix}"
+                + (f" (Vibra: {' | '.join(vibra_errors)})" if vibra_errors else "")
+                + ". Ajuste a data de carga ou o horário do carregamento VIBRA na viagem.",
+                f"Combo de horários: {', '.join(_schedule_option_texts(driver)) or 'vazio'}",
+            )
+        nearest_time = _nearest_time(load_time, free_times)
+        if not nearest_time:
+            raise RegistrationError(
+                f"Horário {load_time} de {date_prefix} indisponível na Vibra e nenhum horário livre "
+                f"a até {MAX_SCHEDULE_TIME_DIFF_MINUTES} min dele. Horários livres no dia: {', '.join(free_times)}. "
+                "Ajuste o horário do carregamento VIBRA na viagem."
+            )
+        adjustment_note = f"Horário {load_time} indisponível na Vibra; agendado no mais próximo, {nearest_time}."
+        print(f"[AVISO] {adjustment_note}")
+        wanted_text = f"{date_prefix} - {nearest_time}"
+        option = _schedule_option(driver, wanted_text)
     Select(driver.find_element(By.ID, SCHEDULE_TIME_SELECT_ID)).select_by_value(option.get_attribute("value"))
     _wait_page_ready(driver)
 
@@ -448,18 +674,74 @@ def schedule_and_finalize(driver: webdriver.Chrome, load_date: str, load_time: s
     print(f"[OK] Horário selecionado: {selected_text}")
 
     print("[INFO] Agendamento > Finalizar")
-    _click(driver, By.ID, FINALIZE_BUTTON_ID)
-    _wait_page_ready(driver)
+    finalize_button = _wait_clickable(driver, By.ID, FINALIZE_BUTTON_ID)
+    try:
+        finalize_button.click()
+    except ReadTimeoutError:
+        # Só o timeout HTTP: o clique foi feito e a Vibra ainda está gerando o protocolo.
+        print("[INFO] 'Finalizar' clicado; a Vibra ainda está carregando o protocolo.")
+    except ElementClickInterceptedException:
+        driver.execute_script("arguments[0].click();", finalize_button)
 
-    errors = [el.text.strip() for el in driver.find_elements(By.CSS_SELECTOR, ERROR_MESSAGE_SELECTORS)
-              if el.is_displayed() and el.text.strip()]
+    try:
+        WebDriverWait(
+            driver, SLOW_SCREEN_TIMEOUT, poll_frequency=1, ignored_exceptions=SLOW_SCREEN_IGNORED_ERRORS
+        ).until(lambda d: _schedule_number(d) or _visible_texts(d, ERROR_MESSAGE_SELECTORS))
+    except TimeoutException:
+        pass
+    errors = _visible_texts(driver, ERROR_MESSAGE_SELECTORS)
     if errors:
         raise RegistrationError(f"A Vibra recusou a programação ao Finalizar: {' | '.join(errors)}")
-    messages = [el.text.strip() for el in driver.find_elements(By.CSS_SELECTOR, MESSAGE_SELECTORS)
-                if el.is_displayed() and el.text.strip()]
-    message = " | ".join(dict.fromkeys(messages))
-    print(f"[OK] Programação finalizada na Vibra. {message}".rstrip())
-    return message
+
+    schedule_number = _schedule_number(driver)
+    message = " | ".join(dict.fromkeys(
+        ([adjustment_note] if adjustment_note else []) + _visible_texts(driver, MESSAGE_SELECTORS)
+    ))
+    if schedule_number:
+        print(f"[OK] Programação criada na Vibra: nº {schedule_number}. {message}".rstrip())
+    else:
+        # Já clicou em Finalizar sem erro: tratar como falha faria o próximo ciclo
+        # cadastrar de novo (programação duplicada na Vibra).
+        print(
+            f"[AVISO] Finalizado sem erro, mas o número da programação não apareceu em {SLOW_SCREEN_TIMEOUT}s "
+            f"- confira na Vibra. URL atual: {driver.current_url}"
+        )
+    return schedule_number, message, wanted_text.split(" - ")[-1]
+
+
+def _nearest_time(wanted_time: str, free_times: List[str]) -> str:
+    """Horário livre mais próximo do planejado, a até MAX_SCHEDULE_TIME_DIFF_MINUTES;
+    no empate fica o mais cedo. "" se nenhum estiver dentro do limite."""
+    def minutes(hhmm: str) -> int:
+        hours, mins = hhmm.split(":")
+        return int(hours) * 60 + int(mins)
+
+    target = minutes(wanted_time)
+    candidates = []
+    for free_time in free_times:
+        try:
+            diff = abs(minutes(free_time) - target)
+        except ValueError:
+            continue
+        if diff <= MAX_SCHEDULE_TIME_DIFF_MINUTES:
+            candidates.append((diff, minutes(free_time), free_time))
+    return min(candidates)[2] if candidates else ""
+
+
+def _schedule_number(driver: webdriver.Chrome) -> str:
+    match = SCHEDULE_NUMBER_PATTERN.search(driver.find_element(By.TAG_NAME, "body").text)
+    return match.group(1) if match else ""
+
+
+def _visible_texts(driver: webdriver.Chrome, css_selector: str) -> List[str]:
+    return [el.text.strip() for el in driver.find_elements(By.CSS_SELECTOR, css_selector)
+            if el.is_displayed() and el.text.strip()]
+
+
+def _remove_error_messages(driver: webdriver.Chrome) -> None:
+    driver.execute_script(
+        "document.querySelectorAll(arguments[0]).forEach(el => el.remove());", ERROR_MESSAGE_SELECTORS
+    )
 
 
 def _schedule_option(driver: webdriver.Chrome, wanted_text: str):
@@ -505,15 +787,20 @@ def _select_calendar_day(driver: webdriver.Chrome, year: int, month: int, day: i
             "Ajuste a data de carga da viagem."
         )
 
+    # A tela pode abrir com alerta de outra data ("Não há horários disponíveis para a
+    # data solicitada"); sem removê-lo, ele seria lido como resposta do dia clicado.
+    _remove_error_messages(driver)
     print(f"[INFO] Calendário: clicando no dia {day:02d}/{month:02d}/{year}")
     _scroll_and_click(driver, day_cells[0])
     _wait_page_ready(driver)
 
-    # O combo é recarregado por AJAX depois do clique no dia; espera ele mostrar a data certa.
+    # O combo é recarregado por AJAX depois do clique no dia; espera ele mostrar a data
+    # certa ou a Vibra avisar que não há horário no dia.
     date_prefix = wanted_text.split(" - ")[0]
     try:
         WebDriverWait(driver, DEFAULT_TIMEOUT).until(
             lambda d: any(text.startswith(date_prefix) for text in _schedule_option_texts(d))
+            or _visible_texts(d, ERROR_MESSAGE_SELECTORS)
         )
     except TimeoutException:
         search_links = [el for el in driver.find_elements(By.XPATH, SEARCH_TIMES_XPATH) if el.is_displayed()]
@@ -538,9 +825,16 @@ def _find_shipment_row(driver: webdriver.Chrome, order_number: str, product_name
     """Linha da Lista de Remessas com a ordem do pedido e o produto. O nome do
     produto difere entre os sistemas ("Etanol Hidratado" x "ETANOL HIDRATADO
     COMBUSTIVEL"): casa quando todas as palavras do portal aparecem na Vibra."""
-    rows = _visible_rows(driver, SHIPMENT_ROWS_XPATH)
-    if not rows:
-        raise RuntimeError("Lista de Remessas vazia ou não carregada na tela de Compartimentação.")
+    try:
+        rows = WebDriverWait(driver, SHIPMENT_LIST_WAIT_SECONDS, poll_frequency=0.5).until(
+            lambda d: _visible_rows(d, SHIPMENT_ROWS_XPATH)
+        )
+    except TimeoutException as exc:
+        raise RegistrationError(
+            f"Pedido Vibra {order_number} não está disponível para programação na Vibra "
+            "(pode estar em análise, sem saldo, já programado ou com outro posto).",
+            f"Lista de Remessas vazia após {SHIPMENT_LIST_WAIT_SECONDS}s",
+        ) from exc
 
     entries = []
     for row in rows:
@@ -570,9 +864,29 @@ def _find_shipment_row(driver: webdriver.Chrome, order_number: str, product_name
         )
         matches = same_order
 
-    row, vibra_product, volume_text, _ = matches[0]
+    # Depois de carregar um compartimento a Vibra divide a remessa em linhas: a já
+    # carregada fica com volume 0 e sem o botão de carregar.
+    loadable = [
+        entry for entry in matches
+        if _volume_m3(entry[2]) > 0 and entry[0].find_elements(By.CSS_SELECTOR, "button[data-toggle='modal']")
+    ]
+    if not loadable:
+        raise RegistrationError(
+            f"Pedido Vibra {order_number} ({product_name}) sem saldo na Lista de Remessas da Vibra "
+            f"(volumes na tela: {', '.join(entry[2] for entry in matches)}). Confira o volume alocado na viagem.",
+        )
+
+    row, vibra_product, volume_text, _ = loadable[0]
     print(f"[INFO] Remessa: {vibra_product} | volume disponível {volume_text} | ordem {order_number}")
     return row, vibra_product
+
+
+def _volume_m3(text: str) -> float:
+    """Volume da Lista de Remessas em m³ com 3 casas: '7,000' = 7 m³."""
+    try:
+        return float(text.replace(".", "").replace(",", "."))
+    except ValueError:
+        return 0.0
 
 
 def _load_shipment_into_compartment(driver: webdriver.Chrome, shipment_row, compartment_number: int) -> None:
@@ -748,7 +1062,7 @@ def _wait_page_ready(driver: webdriver.Chrome, timeout: int = SLOW_SCREEN_TIMEOU
     """Espera document.readyState, jQuery.active e o AJAX do JSF zerarem."""
     time.sleep(0.5)  # dá tempo da requisição começar
     try:
-        WebDriverWait(driver, timeout, poll_frequency=0.5).until(
+        WebDriverWait(driver, timeout, poll_frequency=0.5, ignored_exceptions=SLOW_SCREEN_IGNORED_ERRORS).until(
             lambda d: d.execute_script(
                 """
                 if (document.readyState !== 'complete') return false;
@@ -768,13 +1082,27 @@ def _expand_side_menu(driver: webdriver.Chrome) -> None:
     são via JS, sem mover o ponteiro - mover o mouse até o item é o que fazia o
     menu recolher no caminho."""
     title_xpath = MENU_ITEM_XPATH.format(title="Programação")
+    if _wait_visible(driver, title_xpath, 0):
+        return
     try:
-        icon = WebDriverWait(driver, DEFAULT_TIMEOUT).until(
-            EC.visibility_of_element_located((By.CSS_SELECTOR, f"{MENU_BUTTON_SELECTOR} div.main-item"))
+        WebDriverWait(driver, DEFAULT_TIMEOUT).until(
+            lambda d: _first_visible_css(d, MENU_EXPAND_BUTTON_SELECTOR) or _first_visible_css(d, LEGACY_MENU_ICON_SELECTOR)
         )
     except TimeoutException as exc:
         raise RuntimeError(f"Menu lateral não apareceu em {DEFAULT_TIMEOUT}s. URL atual: {driver.current_url}") from exc
 
+    expand_button = _first_visible_css(driver, MENU_EXPAND_BUTTON_SELECTOR)
+    if expand_button:
+        _scroll_and_click(driver, expand_button)
+        if _wait_visible(driver, title_xpath, 5):
+            return
+        # Clique nativo pode cair no <svg> interno sem disparar o handler do Angular.
+        driver.execute_script("arguments[0].click();", expand_button)
+        if _wait_visible(driver, title_xpath, 5):
+            return
+        raise RuntimeError("Menu lateral não expandiu após clicar no botão: título 'Programação' não apareceu.")
+
+    icon = _first_visible_css(driver, LEGACY_MENU_ICON_SELECTOR)
     ActionChains(driver).move_to_element(icon).perform()
     if _wait_visible(driver, title_xpath, 5):
         return
@@ -789,6 +1117,16 @@ def _expand_side_menu(driver: webdriver.Chrome) -> None:
     )
     if not _wait_visible(driver, title_xpath, 5):
         raise RuntimeError("Menu lateral não expandiu com o mouse em cima: título 'Programação' não apareceu.")
+
+
+def _first_visible_css(driver: webdriver.Chrome, selector: str):
+    for element in driver.find_elements(By.CSS_SELECTOR, selector):
+        try:
+            if element.is_displayed():
+                return element
+        except StaleElementReferenceException:
+            continue
+    return False
 
 
 def _ensure_side_menu_expanded(driver: webdriver.Chrome) -> None:
@@ -853,11 +1191,15 @@ def _first_visible(driver: webdriver.Chrome, xpath: str):
     return False
 
 
-def _click(driver: webdriver.Chrome, by: str, selector: str, timeout: int = DEFAULT_TIMEOUT):
+def _wait_clickable(driver: webdriver.Chrome, by: str, selector: str, timeout: int = DEFAULT_TIMEOUT):
     try:
-        element = WebDriverWait(driver, timeout).until(EC.element_to_be_clickable((by, selector)))
+        return WebDriverWait(driver, timeout).until(EC.element_to_be_clickable((by, selector)))
     except TimeoutException as exc:
         raise RuntimeError(f"Elemento não ficou clicável em {timeout}s: {selector}") from exc
+
+
+def _click(driver: webdriver.Chrome, by: str, selector: str, timeout: int = DEFAULT_TIMEOUT):
+    element = _wait_clickable(driver, by, selector, timeout)
     try:
         element.click()
     except ElementClickInterceptedException:
@@ -878,16 +1220,29 @@ def _select_select2(
     digita e o texto se perde (ficava só "q"). Em vez disso, define o valor via
     jQuery e dispara o 'change', que chama o onchange/AJAX do JSF normalmente.
     """
+    # Espera a opção procurada, não uma quantidade de opções: unidade com um só posto
+    # traz o Pool com uma única opção já selecionada, sem "Selecione".
     try:
         WebDriverWait(driver, timeout).until(
             lambda d: d.execute_script(
-                "var s=document.getElementById(arguments[0]);"
-                "return !!(window.jQuery && s && s.options.length > 1);",
+                """
+                var s = document.getElementById(arguments[0]), t = arguments[1].toUpperCase();
+                return !!(window.jQuery && s && Array.from(s.options).some(function (o) {
+                    return o.text.toUpperCase().indexOf(t) >= 0;
+                }));
+                """,
                 select_id,
+                text,
             )
         )
     except TimeoutException as exc:
-        raise RuntimeError(f"Combo #{select_id} não carregou as opções em {timeout}s.") from exc
+        detail = (
+            f"opção contendo '{text}' não apareceu em #{select_id} em {timeout}s; "
+            f"opções na tela: {_combo_options_text(driver, select_id)}"
+        )
+        if not_found_message:
+            raise RegistrationError(not_found_message, detail) from exc
+        raise RuntimeError(f"Combo: {detail}.") from exc
 
     selected = driver.execute_script(
         """
@@ -906,7 +1261,27 @@ def _select_select2(
     )
     if not selected:
         if not_found_message:
-            raise RegistrationError(not_found_message, f"opção contendo '{text}' não encontrada em #{select_id}")
+            raise RegistrationError(
+                not_found_message,
+                f"opção contendo '{text}' não encontrada em #{select_id}; "
+                f"opções na tela: {_combo_options_text(driver, select_id)}",
+            )
         raise RuntimeError(f"Opção contendo '{text}' não encontrada em #{select_id}.")
     print(f"[OK]   -> selecionado: {selected}")
     return selected
+
+
+def _combo_options_text(driver: webdriver.Chrome, select_id: str) -> str:
+    options = driver.execute_script(
+        """
+        var s = document.getElementById(arguments[0]);
+        return s ? Array.from(s.options).map(function (o) { return o.text.trim(); }).filter(Boolean) : null;
+        """,
+        select_id,
+    )
+    if options is None:
+        return "combo não está na tela"
+    if not options:
+        return "nenhuma"
+    hidden_count = len(options) - MAX_LOGGED_COMBO_OPTIONS
+    return " / ".join(options[:MAX_LOGGED_COMBO_OPTIONS]) + (f" (+{hidden_count})" if hidden_count > 0 else "")
