@@ -107,6 +107,12 @@ No portal, reabrir + alterar + **liberar de novo** uma viagem que já tem nota d
 `trip_registration_edit` (migração 035 do portal; `requestTripRegistrationEdit` em
 `lib/rpaTripRegistration.ts`, chamado no `liberar`). Status: `pending` (fila do agente), `done`,
 `error` (mensagem para o usuário; "Tentar de novo" ou liberar de novo voltam para `pending`).
+Liberar de novo **sem mudar nada** do que vai para a Vibra (data de carga, conjunto, horário do
+carregamento VIBRA, pedidos x compartimentos - motorista não conta) **não** abre edição: o portal compara
+com a assinatura do último cadastro/edição (`trip_registration_signature` + `fn_trip_registration_signature`,
+migração 037 do portal). Rede de segurança no bot: se mesmo assim chegar uma edição sem mudança real
+(data/horário iguais e compartimentos já batendo - `compartments_already_match`), sai da tela sem
+alterar e devolve `EDITADO` com o mesmo número.
 Viagem com edição em aberto **não** sai em `planejados` (pedido novo incluído na edição viraria
 outra programação). No quadro de viagens: selo EDIÇÃO no compartimento; erro de edição usa o
 mesmo quadro de ERRO + "Tentar de novo".

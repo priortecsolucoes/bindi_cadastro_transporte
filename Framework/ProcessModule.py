@@ -25,6 +25,7 @@ from selenium.common.exceptions import WebDriverException
 
 from Automation.VibraPortal import (
     RegistrationError,
+    compartments_already_match,
     delete_schedule,
     fill_edit_registration,
     fill_registration,
@@ -239,6 +240,16 @@ def _edit_trip(driver, main_handle: str, config: BotConfig, item: dict, log_modu
     filled = fill_edit_registration(driver, first_pool, item.get("plates") or [item["plate"]], item["carrier"])
     item["plate"] = filled["plate"]
     selected = {"pools": {first_pool: filled["pool"]}, "carrier": filled["carrier"]}
+
+    # Liberada de novo sem mudança real (ex.: reabriu sem querer): não altera nada na Vibra.
+    if compartments_already_match(driver, item["orders"]):
+        print(f"[OK] Nada mudou em relação à programação {old_number} na Vibra - alteração não necessária.")
+        detail = (
+            f"{EDIT_REQUEST_LABEL} {item['editRequestId']} | Sem mudança: programação {old_number} mantida"
+            f" | {SCHEDULED_LABEL} {current['date']} {current['time']} | Editado"
+            f" | {SCHEDULE_NUMBER_LABEL} {old_number}"
+        )
+        return company, selected, STATUS_EDITED, detail, old_number, "", current["time"]
 
     # Só mexe no que mudou: esvazia (lixeira) os compartimentos divergentes, mantém os
     # que batem e carrega os novos.

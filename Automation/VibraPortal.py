@@ -1462,6 +1462,24 @@ def unload_mismatched_compartments(driver: webdriver.Chrome, orders: List[dict])
     raise RuntimeError("Compartimentos continuaram divergentes depois de esvaziar um por um - confira a tela.")
 
 
+def compartments_already_match(driver: webdriver.Chrome, orders: List[dict]) -> bool:
+    """True se a Compartimentação da alteração já está exatamente como a viagem: todo
+    compartimento planejado carregado com a ordem/produto certos e nenhum outro
+    carregado - não há o que alterar na Vibra."""
+    planned = {
+        int(compartment["number"]): (order["distributorOrderNumber"], item["productName"])
+        for order in orders
+        for item in order.get("items", [])
+        for compartment in item.get("compartments", [])
+    }
+    if _first_mismatched_vehicle_row(driver, planned) is not None:
+        return False
+    return all(
+        _vehicle_row_matches(_find_vehicle_row(driver, number), order_number, product_name)
+        for number, (order_number, product_name) in planned.items()
+    )
+
+
 def _first_mismatched_vehicle_row(driver: webdriver.Chrome, planned: Dict[int, Tuple[str, str]]):
     """(linha, nº do compartimento, ordem na tela) do 1º compartimento carregado que
     não bate com a viagem; None se todos os carregados batem."""
