@@ -16,6 +16,7 @@ from typing import Dict, List, Optional
 from Framework.InitModule import BotConfig
 from Framework.RPAFrameworkException import RPAFrameworkException
 from Log.LogModule import (
+    DELETION_REQUEST_IN_DETAIL,
     EDIT_REQUEST_IN_DETAIL,
     SCHEDULE_DELETED_IN_DETAIL,
     SCHEDULE_NUMBER_IN_DETAIL,
@@ -27,7 +28,7 @@ from Log.LogModule import (
     STATUS_SCHEDULE_DELETED,
     output_path,
 )
-from Utils.PortalClient import fetch_edit_trips, fetch_planned_trips
+from Utils.PortalClient import fetch_deletion_requests, fetch_edit_trips, fetch_planned_trips
 
 REQUIRED_CSV_COLUMNS = ("pool", "placa")
 
@@ -110,7 +111,44 @@ def get_data(config: BotConfig) -> List[dict]:
             f"(histórico em {history_path})."
         )
     print(f"[OK] {len(trips_to_register)} programação(ões) a registrar na Vibra.")
-    return pending + _load_edit_items(config, history)
+    return pending + _load_edit_items(config, history) + _load_deletion_items(config, history)
+
+
+def _load_deletion_items(config: BotConfig, history: Dict[tuple, dict]) -> List[dict]:
+    """Fila de exclusão: programações de viagens excluídas no portal ("Excluir
+    quadro"). Só do portal - em simulação (mocks) não é consultada. Exclusão já
+    EXCLUIDA no histórico vem com "alreadyDeleted", só para reenviar o resultado."""
+    if config.planned_mock_path or config.edit_mock_path:
+        return []
+    items: List[dict] = []
+    for deletion in fetch_deletion_requests(config.portal_api_url, config.portal_api_token):
+        deletion_history = history.get(_deletion_key(deletion["deletionRequestId"]), {})
+        item = {
+            "isDeletion": True,
+            "deletionRequestId": deletion["deletionRequestId"],
+            "tripId": deletion["tripId"],
+            "scheduleNumber": str(deletion.get("distributorReference") or ""),
+            "loadDate": deletion["loadDate"],
+            "loadTime": "",
+            "pool": "-",
+            "pools": [],
+            "plate": deletion.get("tractorPlate") or "",
+            "carrier": "",
+            "orders": [],
+            "reportToPortal": True,
+            "technicalErrors": deletion_history.get("technical_errors", 0),
+        }
+        if deletion_history.get("finalized"):
+            # Já excluída na Vibra, mas o retorno ao portal não chegou: só reenvia.
+            item["alreadyDeleted"] = True
+        items.append(item)
+    to_delete = sum(1 for item in items if not item.get("alreadyDeleted"))
+    print(f"[OK] {to_delete} programação(ões) a excluir na Vibra.")
+    return items
+
+
+def _deletion_key(deletion_request_id) -> tuple:
+    return "DEL", str(deletion_request_id).strip()
 
 
 def _load_edit_items(config: BotConfig, history: Dict[tuple, dict]) -> List[dict]:
@@ -222,11 +260,18 @@ def _load_history(history_path: str) -> Dict[tuple, dict]:
             for row in csv.DictReader(file):
                 if not row.get("trip_id"):
                     continue
-                edit_request = EDIT_REQUEST_IN_DETAIL.search(row.get("detail") or "")
-                key = _edit_key(edit_request.group(1)) if edit_request else _item_key(row["trip_id"], row.get("pool", ""))
+                detail = row.get("detail") or ""
+                deletion_request = DELETION_REQUEST_IN_DETAIL.search(detail)
+                edit_request = EDIT_REQUEST_IN_DETAIL.search(detail)
+                if deletion_request:
+                    key = _deletion_key(deletion_request.group(1))
+                elif edit_request:
+                    key = _edit_key(edit_request.group(1))
+                else:
+                    key = _item_key(row["trip_id"], row.get("pool", ""))
                 entry = history.setdefault(key, {"finalized": False, "technical_errors": 0})
                 status = row.get("status")
-                if status in (STATUS_FINALIZED, STATUS_EDITED):
+                if status in (STATUS_FINALIZED, STATUS_EDITED) or (deletion_request and status == STATUS_SCHEDULE_DELETED):
                     entry["finalized"] = True
                     number = SCHEDULE_NUMBER_IN_DETAIL.search(row.get("detail") or "")
                     if number:

@@ -102,6 +102,11 @@ class RegistrationError(RuntimeError):
         self.user_message = user_message
 
 
+class ScheduleNotFoundError(RegistrationError):
+    """Programação não encontrada na Consulta da Vibra (no intervalo pesquisado). Na
+    edição é erro para o usuário; na exclusão quer dizer que ela já não está lá."""
+
+
 # --------------------------------------------------------------------------
 # Login
 # --------------------------------------------------------------------------
@@ -1264,7 +1269,7 @@ def find_schedule(
             print(f"[INFO] Programação {schedule_number} encontrada na Consulta: agendada em {match.group(1)} {match.group(2)}.")
             return {"date": f"{year}-{month}-{day}", "time": match.group(2)}
         window_start = window_end + timedelta(days=1)
-    raise RegistrationError(
+    raise ScheduleNotFoundError(
         f"Programação {schedule_number} não encontrada na Consulta da Vibra (Data Programada de "
         f"{date_from:%d/%m/%Y} a {date_to:%d/%m/%Y}). Pode ter sido cancelada ou ter data fora desse "
         "intervalo - confira na Vibra e altere manualmente se precisar."

@@ -150,3 +150,60 @@ def report_registration(
             f"(HTTP {response.status_code}): {response.text[:300]}"
         )
     return response.json()
+
+
+def fetch_deletion_requests(base_url: str, token: str) -> List[dict]:
+    """GET /api/rpa/vibra/exclusoes - fila de exclusão: programações de viagens
+    excluídas no portal ("Excluir quadro") que precisam ser excluídas na Vibra.
+    Cada item: deletionRequestId, tripId, distributorReference (nº da programação),
+    loadDate, tractorPlate, requestedAt."""
+    url = f"{base_url.rstrip('/')}/api/rpa/vibra/exclusoes"
+    try:
+        response = requests.get(url, headers=_headers(token), timeout=REQUEST_TIMEOUT_SECONDS)
+    except requests.RequestException as exc:
+        raise RPAFrameworkException(f"Falha ao conectar no Portal Bindi Log ({url}): {exc}") from exc
+
+    if response.status_code != 200:
+        raise RPAFrameworkException(
+            f"Portal Bindi Log recusou a busca da fila de exclusão (HTTP {response.status_code}): "
+            f"{response.text[:300]}"
+        )
+
+    try:
+        deletions = response.json().get("deletions", [])
+    except ValueError as exc:
+        raise RPAFrameworkException(f"Resposta inválida do Portal Bindi Log ({url}): {response.text[:300]}") from exc
+
+    print(f"[OK] {len(deletions)} programação(ões) na fila de exclusão do Portal Bindi Log.")
+    return deletions
+
+
+def report_deletion(
+    base_url: str,
+    token: str,
+    deletion_request_id: int,
+    deleted: bool,
+    observation: Optional[str] = None,
+    technical_detail: Optional[str] = None,
+) -> dict:
+    """POST /api/rpa/vibra/exclusoes - resultado da exclusão de uma programação.
+    deleted=True também quando ela já não estava na Vibra (observation explica).
+    Levanta RuntimeError (erro do item, não da execução)."""
+    url = f"{base_url.rstrip('/')}/api/rpa/vibra/exclusoes"
+    payload = {
+        "deletionRequestId": deletion_request_id,
+        "deleted": deleted,
+        "observation": observation or None,
+        "technicalDetail": technical_detail or None,
+    }
+    try:
+        response = requests.post(url, headers=_headers(token), json=payload, timeout=REQUEST_TIMEOUT_SECONDS)
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Falha ao conectar no Portal Bindi Log ({url}): {exc}") from exc
+
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"Portal Bindi Log recusou o resultado da exclusão {deletion_request_id} "
+            f"(HTTP {response.status_code}): {response.text[:300]}"
+        )
+    return response.json()

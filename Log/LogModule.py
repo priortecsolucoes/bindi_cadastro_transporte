@@ -21,6 +21,10 @@ STATUS_EDITED = "EDITADO"
 # a próxima tentativa não procurar a programação que já não existe.
 STATUS_SCHEDULE_DELETED = "EXCLUIDO"
 SCHEDULE_DELETED_LABEL = "Programação excluída para recriar nº"
+# Fila de exclusão (viagem excluída no portal): histórico por pedido de exclusão; status
+# EXCLUIDO = programação excluída na Vibra (ou já não estava lá).
+DELETION_REQUEST_LABEL = "Pedido de exclusão nº"
+DELETION_REQUEST_IN_DETAIL = re.compile(re.escape(DELETION_REQUEST_LABEL) + r" (\d+)")
 SCHEDULE_DELETED_IN_DETAIL = re.compile(re.escape(SCHEDULE_DELETED_LABEL) + r" (\d+)")
 # Erro técnico: a programação é tentada de novo no próximo ciclo (ver GetDataModule).
 STATUS_ERROR = "ERRO"
@@ -102,6 +106,7 @@ class LogModule:
         print(
             f"[OK] {total} programação(ões) desta execução gravada(s) em {self._output_path} "
             f"({self._status_count[STATUS_FINALIZED]} finalizada(s), {self._status_count[STATUS_EDITED]} editada(s), "
+            f"{self._status_count[STATUS_SCHEDULE_DELETED]} excluída(s), "
             f"{self._status_count[STATUS_FILLED]} só preenchida(s), "
             f"{self._status_count[STATUS_ERROR_REPORTED]} com erro enviado ao portal, "
             f"{self._status_count[STATUS_ERROR]} com erro técnico)."

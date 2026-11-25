@@ -159,6 +159,26 @@ cadastro (`RegistrationError` direto ao portal, técnico após `MAX_TECHNICAL_AT
 Simulação: `EDICOES_MOCK_PATH` (ex. `edicoes.example.json`); com `PLANEJADOS_MOCK_PATH` e sem ele
 a fila não é consultada.
 
+### Fila de exclusão (viagem excluída no portal)
+"Excluir quadro" de uma viagem já cadastrada grava, **antes** de apagar a viagem (depois disso
+`order_event.trip_id` vira nulo), um pedido de exclusão na tabela `trip_registration_deletion`
+(migração 038 do portal, sem FK para `trip`; `requestTripRegistrationDeletion` em
+`lib/rpaTripRegistration.ts`, chamado no `DELETE /api/controle/viagens/[id]`) com o nº da última
+programação e a data de carga. A confirmação do "Excluir quadro" avisa que a programação na Vibra
+também será excluída.
+- `GET /api/rpa/vibra/exclusoes` → `{ deletions: [{ deletionRequestId, tripId, distributorReference,
+  loadDate, tractorPlate, requestedAt }] }` (só `pending`).
+- `POST /api/rpa/vibra/exclusoes` (`Utils/PortalClient.report_deletion`): `{ deletionRequestId,
+  deleted, observation?, technicalDetail? }` → `done` / `error` (resultado fica só no pedido; a
+  viagem já não existe - **ainda não há tela no portal para os erros**, só o log do agente).
+O agente processa a fila **depois das edições** (`ProcessModule._delete_trip_schedule`): Consultar >
+`find_schedule` (fatias de 5 dias em torno da data de carga) > `delete_schedule`. Programação não
+encontrada (`ScheduleNotFoundError`) = já não está na Vibra → `done` com observação. CSV: status
+`EXCLUIDO` com `Pedido de exclusão nº N` no detail (histórico por pedido de exclusão; `EXCLUIDO` com o
+portal ainda devolvendo = só reenvia). Erros seguem as regras do cadastro. Em simulação (mocks) a fila
+não é consultada. Viagens excluídas **antes** desta mudança (ex.: programação 4041613585) não entram na
+fila: excluir manualmente na Vibra.
+
 Agendamento: `main.py` repete o pipeline a cada `SCHEDULE_INTERVAL_MINUTES` (padrão 5; 0 = uma
 vez). O CSV de saída é **acumulado** e serve de histórico: viagem + pool já `FINALIZADO` nunca é
 cadastrada de novo na Vibra - se o portal ainda a devolve (retorno falhou), só o resultado é
@@ -254,7 +274,7 @@ Python 3.11+, `selenium`, `python-dotenv`, `requests`.
 ├── Framework/
 │   ├── InitModule.py                ← valida .env, credenciais e pré-requisitos
 │   ├── GetDataModule.py             ← pedidos planejados + fila de edição do portal (ou mocks/CSV)
-│   ├── ProcessModule.py             ← login → cadastra as programações, depois edita as da fila
+│   ├── ProcessModule.py             ← login → cadastra, depois edita e por fim exclui (filas do portal)
 │   ├── EndModule.py                 ← finalização (fecha o CSV, imprime resumo)
 │   └── RPAFrameworkException.py     ← exceção controlada
 ├── Automation/

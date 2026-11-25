@@ -25,6 +25,7 @@ from selenium.common.exceptions import WebDriverException
 
 from Automation.VibraPortal import (
     RegistrationError,
+    ScheduleNotFoundError,
     compartments_already_match,
     delete_schedule,
     fill_edit_registration,
@@ -43,6 +44,7 @@ from Automation.VibraPortal import (
 from Framework.InitModule import BotConfig
 from Framework.RPAFrameworkException import RPAFrameworkException
 from Log.LogModule import (
+    DELETION_REQUEST_LABEL,
     EDIT_REQUEST_LABEL,
     SCHEDULE_DELETED_LABEL,
     SCHEDULE_NUMBER_LABEL,
@@ -56,7 +58,7 @@ from Log.LogModule import (
     LogModule,
 )
 from Utils.DriverFactory import create_driver, load_cookies, save_cookies
-from Utils.PortalClient import report_edit, report_registration
+from Utils.PortalClient import report_deletion, report_edit, report_registration
 
 DEFAULT_COOKIES_PATH = "vibra_cookies.json"
 MAX_TECHNICAL_ATTEMPTS = 3
@@ -64,6 +66,10 @@ TECHNICAL_ERROR_MESSAGE = (
     "Falha técnica do agente ao cadastrar a Programação FOB na Vibra ({attempts} tentativas seguidas). "
     "Cadastre manualmente se for urgente e acione o suporte da automação (veja 'Detalhes técnicos'). "
     "Para o agente tentar de novo, use 'Tentar de novo' na viagem."
+)
+TECHNICAL_DELETION_ERROR_MESSAGE = (
+    "Falha técnica do agente ao excluir a Programação FOB {schedule_number} na Vibra ({attempts} tentativas "
+    "seguidas). Exclua manualmente na Vibra e acione o suporte da automação."
 )
 TECHNICAL_EDIT_ERROR_MESSAGE = (
     "Falha técnica do agente ao alterar a Programação FOB {schedule_number} na Vibra ({attempts} tentativas "
@@ -79,12 +85,17 @@ def process_items(items: List[dict], config: BotConfig, log_module: LogModule) -
             _resend_finalized_result(config, item, log_module)
         elif item.get("alreadyEdited"):
             _resend_edited_result(config, item, log_module)
-    # Cadastros antes das edições (o GetDataModule já devolve nessa ordem).
-    items = [item for item in items if not item.get("alreadyFinalized") and not item.get("alreadyEdited")]
-    items.sort(key=lambda item: bool(item.get("isEdit")))
+        elif item.get("alreadyDeleted"):
+            _resend_deleted_result(config, item, log_module)
+    items = [
+        item for item in items
+        if not item.get("alreadyFinalized") and not item.get("alreadyEdited") and not item.get("alreadyDeleted")
+    ]
+    # Cadastros, depois edições, depois exclusões (o GetDataModule já devolve nessa ordem).
+    items.sort(key=lambda item: 2 if item.get("isDeletion") else 1 if item.get("isEdit") else 0)
 
     if not items:
-        print("[INFO] Nenhuma programação a registrar ou editar na Vibra - não abrindo o navegador.")
+        print("[INFO] Nenhuma programação a registrar, editar ou excluir na Vibra - não abrindo o navegador.")
         return
 
     try:
@@ -128,7 +139,12 @@ def process_items(items: List[dict], config: BotConfig, log_module: LogModule) -
         for index, item in enumerate(items, start=1):
             print("=" * 55)
             trip_label = f"viagem {item['tripId']} ({item['loadDate']} {item['loadTime']}) | " if item.get("tripId") else ""
-            action = f"Edição da programação {item.get('scheduleNumber') or '(sem nº)'}" if item.get("isEdit") else "Programação"
+            if item.get("isDeletion"):
+                action = f"Exclusão da programação {item.get('scheduleNumber') or '(sem nº)'}"
+            elif item.get("isEdit"):
+                action = f"Edição da programação {item.get('scheduleNumber') or '(sem nº)'}"
+            else:
+                action = "Programação"
             print(
                 f"[INFO] {action} {index}/{len(items)}: {trip_label}pool {item['pool']} | "
                 f"placa {item['plate']} | transportador {item['carrier']}"
@@ -143,21 +159,29 @@ def process_items(items: List[dict], config: BotConfig, log_module: LogModule) -
                     f"{order.get('vibraPool', item['pool'])} | {products}"
                 )
             try:
-                if item.get("isEdit"):
+                if item.get("isDeletion"):
+                    step_result = _delete_trip_schedule(driver, main_handle, config, item)
+                elif item.get("isEdit"):
                     step_result = _edit_trip(driver, main_handle, config, item, log_module)
                 else:
                     step_result = _register_trip(driver, main_handle, config, item)
                 company, selected, status, detail, schedule_number, vibra_message, scheduled_time = step_result
                 detail = f"Unidade Vibra: {company} | {detail}"
             except Exception as exc:  # noqa: BLE001 - erro por programação não pode parar o loop
-                screenshot_name = f"erro_edicao_{index}.png" if item.get("isEdit") else f"erro_programacao_{index}.png"
+                kind = "exclusao" if item.get("isDeletion") else "edicao" if item.get("isEdit") else "programacao"
+                screenshot_name = f"erro_{kind}_{index}.png"
                 screenshot_path = _save_screenshot(driver, screenshot_name)
                 _handle_error(config, item, exc, screenshot_path, log_module)
                 continue
 
             print(f"[OK] Programação da placa {item['plate']}: {status}.")
-            if status in (STATUS_FINALIZED, STATUS_EDITED) and item.get("reportToPortal"):
-                report = _report_edited if item.get("isEdit") else _report_registered
+            if status in (STATUS_FINALIZED, STATUS_EDITED, STATUS_SCHEDULE_DELETED) and item.get("reportToPortal"):
+                if item.get("isDeletion"):
+                    report = _report_deleted
+                elif item.get("isEdit"):
+                    report = _report_edited
+                else:
+                    report = _report_registered
                 try:
                     report(config, item, schedule_number, vibra_message, scheduled_time)
                 except Exception as exc:  # noqa: BLE001 - já está na Vibra; o próximo ciclo reenvia
@@ -272,6 +296,29 @@ def _edit_trip(driver, main_handle: str, config: BotConfig, item: dict, log_modu
     return company, selected, STATUS_EDITED, detail, schedule_number, vibra_message, scheduled_time
 
 
+def _delete_trip_schedule(driver, main_handle: str, config: BotConfig, item: dict) -> tuple:
+    """Fila de exclusão: Consultar > acha a programação > lixeira > Excluir. Se ela
+    não estiver na Consulta, já não existe na Vibra - conta como excluída."""
+    number = item["scheduleNumber"]
+    go_home(driver, main_handle)
+    company = select_company(driver, config.company)
+    open_fob_query(driver)
+    date_from, date_to = _edit_search_window(item["loadDate"], config.edit_search_days)
+    try:
+        find_schedule(driver, number, date_from, date_to, config.vibra_base, config.company.split(" - ", 1)[-1].strip())
+    except ScheduleNotFoundError:
+        note = (
+            f"Programação {number} não encontrada na Consulta da Vibra ({date_from:%d/%m/%Y} a {date_to:%d/%m/%Y}) "
+            "- considerada já excluída."
+        )
+        print(f"[AVISO] {note}")
+        detail = f"{DELETION_REQUEST_LABEL} {item['deletionRequestId']} | {note}"
+        return company, {}, STATUS_SCHEDULE_DELETED, detail, number, note, ""
+    delete_schedule(driver, number)
+    detail = f"{DELETION_REQUEST_LABEL} {item['deletionRequestId']} | Programação {number} excluída na Vibra"
+    return company, {}, STATUS_SCHEDULE_DELETED, detail, number, "", ""
+
+
 def _schedule_change(item: dict, current: dict) -> str:
     """Descrição da mudança de data/horário entre a programação na Vibra e a viagem
     ("" = mantidos). O horário só conta como mudado se o carregamento foi alterado
@@ -323,6 +370,11 @@ def _write_result(log_module: LogModule, item: dict, status: str, selected: dict
     """Uma linha por posto da programação: o histórico (GetDataModule) é por viagem + posto.
     Na edição, uma linha só (histórico por pedido de edição, que vai no detail)."""
     selected = selected or {}
+    if item.get("isDeletion"):
+        if DELETION_REQUEST_LABEL not in detail:
+            detail = f"{DELETION_REQUEST_LABEL} {item['deletionRequestId']} | {detail}"
+        log_module.write_result(item, status, detail=detail)
+        return
     if item.get("isEdit"):
         if EDIT_REQUEST_LABEL not in detail:
             detail = f"{EDIT_REQUEST_LABEL} {item['editRequestId']} | {detail}"
@@ -352,11 +404,16 @@ def _handle_error(config: BotConfig, item: dict, exc: Exception, screenshot_path
     if isinstance(exc, RegistrationError):
         user_message = exc.user_message
     elif attempts >= MAX_TECHNICAL_ATTEMPTS:
-        user_message = (
-            TECHNICAL_EDIT_ERROR_MESSAGE.format(attempts=attempts, schedule_number=item.get("scheduleNumber") or "")
-            if item.get("isEdit")
-            else TECHNICAL_ERROR_MESSAGE.format(attempts=attempts)
-        )
+        if item.get("isDeletion"):
+            user_message = TECHNICAL_DELETION_ERROR_MESSAGE.format(
+                attempts=attempts, schedule_number=item.get("scheduleNumber") or ""
+            )
+        elif item.get("isEdit"):
+            user_message = TECHNICAL_EDIT_ERROR_MESSAGE.format(
+                attempts=attempts, schedule_number=item.get("scheduleNumber") or ""
+            )
+        else:
+            user_message = TECHNICAL_ERROR_MESSAGE.format(attempts=attempts)
     else:
         user_message = None
 
@@ -368,6 +425,9 @@ def _handle_error(config: BotConfig, item: dict, exc: Exception, screenshot_path
         return
 
     print(f"[INFO]   Detalhe técnico: {technical_detail}")
+    if item.get("isDeletion"):
+        _report_deletion_error(config, item, user_message, technical_detail, log_module)
+        return
     if item.get("isEdit"):
         _report_edit_error(config, item, user_message, technical_detail, log_module)
         return
@@ -394,6 +454,40 @@ def _handle_error(config: BotConfig, item: dict, exc: Exception, screenshot_path
         "a viagem volta para o agente depois que o usuário corrigir e liberar de novo."
     )
     _write_result(log_module, item, STATUS_ERROR_REPORTED, detail=f"{user_message} | {technical_detail}")
+
+
+def _report_deletion_error(
+    config: BotConfig, item: dict, user_message: str, technical_detail: str, log_module: LogModule
+) -> None:
+    try:
+        report_deletion(
+            config.portal_api_url, config.portal_api_token, item["deletionRequestId"], False,
+            observation=user_message, technical_detail=technical_detail,
+        )
+    except Exception as report_exc:  # noqa: BLE001 - registra no CSV e tenta de novo no próximo ciclo
+        print(f"[ERRO] Falha ao informar o erro da exclusão {item['deletionRequestId']} ao Portal Bindi Log: {report_exc}")
+        _write_result(
+            log_module, item, STATUS_ERROR, detail=f"{user_message} | {technical_detail} | Retorno ao portal falhou: {report_exc}"
+        )
+        return
+    print(f"[OK] Erro da exclusão {item['deletionRequestId']} informado ao Portal Bindi Log.")
+    _write_result(log_module, item, STATUS_ERROR_REPORTED, detail=f"{user_message} | {technical_detail}")
+
+
+def _report_deleted(config: BotConfig, item: dict, schedule_number: str, observation: str, _scheduled_time: str) -> None:
+    report_deletion(config.portal_api_url, config.portal_api_token, item["deletionRequestId"], True, observation=observation)
+    print(f"[OK] Resultado enviado ao Portal Bindi Log: programação {schedule_number} excluída na Vibra.")
+
+
+def _resend_deleted_result(config: BotConfig, item: dict, log_module: LogModule) -> None:
+    print("=" * 55)
+    print(f"[INFO] Exclusão {item['deletionRequestId']}: já feita na Vibra - reenviando o resultado ao portal.")
+    try:
+        _report_deleted(config, item, item["scheduleNumber"], "", "")
+    except Exception as exc:  # noqa: BLE001 - tenta de novo no próximo ciclo
+        print(f"[ERRO] Retorno ao portal da exclusão {item['deletionRequestId']} falhou de novo: {exc}")
+        return
+    _write_result(log_module, item, STATUS_SCHEDULE_DELETED, detail="Resultado reenviado ao portal (já excluída na Vibra)")
 
 
 def _report_edit_error(
