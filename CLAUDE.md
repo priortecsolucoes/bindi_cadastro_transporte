@@ -100,6 +100,59 @@ um pedido dividido em várias viagens é cadastrado viagem a viagem.
 - Erro técnico (`RuntimeError`): tenta de novo nos próximos ciclos; na `MAX_TECHNICAL_ATTEMPTS`ª
   (3) seguida vai ao portal como erro com mensagem genérica de falha técnica.
 - Mock (`PLANEJADOS_MOCK_PATH`) e `PROGRAMACOES_PATH` não enviam nada ao portal.
+### Fila de edição (viagem já programada e alterada no portal)
+Origem: o protótipo `vibra_edicao.py` (standalone, lia do Postgres), integrado ao pipeline.
+No portal, reabrir + alterar + **liberar de novo** uma viagem que já tem nota de cadastro
+(`order_event` `registered_at_distributor` com `trip_id`) abre um pedido de edição na tabela
+`trip_registration_edit` (migração 035 do portal; `requestTripRegistrationEdit` em
+`lib/rpaTripRegistration.ts`, chamado no `liberar`). Status: `pending` (fila do agente), `done`,
+`error` (mensagem para o usuário; "Tentar de novo" ou liberar de novo voltam para `pending`).
+Viagem com edição em aberto **não** sai em `planejados` (pedido novo incluído na edição viraria
+outra programação). No quadro de viagens: selo EDIÇÃO no compartimento; erro de edição usa o
+mesmo quadro de ERRO + "Tentar de novo".
+- `GET /api/rpa/vibra/edicoes` (rota em `C:\Priortec\Bindi-PAINEL\app\api\rpa\vibra\edicoes\route.ts`):
+  mesmo formato de `planejados` + `isEdit: true`, `editRequestId`, `distributorReference`
+  (programação a alterar), `editRequestedAt`, `distributorScheduledTime` (horário aceito pela Vibra;
+  **nulo quando o usuário alterou o carregamento** - o portal apaga o valor); a viagem inteira como
+  está agora, `load_date >= hoje`.
+  `planejados` devolve `isEdit: false`.
+- `POST /api/rpa/vibra/edicoes` (`Utils/PortalClient.report_edit`): `{ editRequestId, tripId, edited,
+  observation?, technicalDetail?, distributorMessage?, distributorReference?, scheduledTime? }`.
+  Alterada: fecha o pedido e grava nota de cadastro (REG + nº) em todos os pedidos Vibra da viagem.
+  Reenvio de pedido já `done` responde `alreadyDone`.
+
+O agente processa a fila **depois dos cadastros**, na mesma sessão (`ProcessModule._edit_trip`):
+home > unidade > menu Programação > Programação FOB > **Consultar** > Data Programada de ontem até
+`VIBRA_EDIT_SEARCH_DAYS` (padrão 15) à frente (a data antiga da programação não é guardada no
+portal) - a Vibra aceita no máximo **5 dias** por pesquisa (`MAX_QUERY_RANGE_DAYS`, dias
+inclusos), então a janela é pesquisada em fatias de 5 dias até achar a programação -, Base =
+`VIBRA_BASE` (padrão `BABET`, combo select2 `#formConProgcmbBase` que abre em outra base; `0` = mantém), Cliente = nome da `VIBRA_UNIDADE` > "Pesquisar Programações" > linha com o nº (pagina; `find_schedule` lê a coluna Agendamento "26/11/2026 01:00").
+**A alteração da Vibra (lápis) não muda data/horário**, então `_schedule_change` decide:
+- **Data mudou** (Agendamento x `loadDate`) ou **horário mudou** (carregamento alterado no portal =
+  `distributorScheduledTime` nulo, e Agendamento x `loadTime`): `delete_schedule` (lixeira da linha
+  `span#...:roleExcluirProgramacao a` > modal `#formConProg:confirmDialog` "Confirma a exclusão da
+  programação N ?" > `a#formConProg:btnExcluir`, confere que a linha sumiu) > grava `EXCLUIDO`
+  no CSV (`Programação excluída para recriar nº N`) > cadastra uma nova pelo fluxo do cadastro
+  (`_register_trip`) > reporta a edição com o **número novo**. Se o cadastro novo falhar, a próxima
+  tentativa vê o `EXCLUIDO` e só cadastra (a mensagem ao usuário avisa que a antiga já foi excluída).
+  Horário diferente só porque a Vibra agendou no livre mais próximo **não** recria.
+- **Senão** (só compartimentos/pedidos): lápis "Alterar Programação" >
+"Alterar" no modal > Pesquisa de Remessas > Pesquisar > "Alterar Programação - Compartimentação"
+(`fill_edit_registration`): placa e transportador vêm **fixos** (texto "Placa: QUT8C39", sem campo,
+Buscar ou `#cmbTranspp`) - só seleciona o Pool e confere a placa (placa trocada na viagem =
+`RegistrationError`, a Vibra não deixa trocar na alteração). **Só mexe no que mudou**: compartimento
+carregado que bate (ordem + produto) fica; o que diverge ou saiu da viagem é esvaziado na lixeira
+(`unload_mismatched_compartments`, um por vez - o clique re-renderiza o `@form`); os novos/vazios são
+carregados pelo fluxo normal (`load_compartments`). Se só a data mudou, nada é esvaziado nem carregado >
+Agendamento com a data/horário atuais da programação (sem tela de horários, ou já selecionado =
+só conclui) > Finalizar (na edição aceita também 'Alterar'/'Salvar'/'Confirmar') > nº da programação
+(sem ele na tela, vale o original). Histórico no CSV: status `EDITADO`, uma linha por edição, com
+`Pedido de edição nº N` no detail - a chave do histórico da edição é esse nº (não viagem + posto);
+`EDITADO` com o portal ainda devolvendo o pedido = só reenvia o resultado. Erros seguem as regras do
+cadastro (`RegistrationError` direto ao portal, técnico após `MAX_TECHNICAL_ATTEMPTS`).
+Simulação: `EDICOES_MOCK_PATH` (ex. `edicoes.example.json`); com `PLANEJADOS_MOCK_PATH` e sem ele
+a fila não é consultada.
+
 Agendamento: `main.py` repete o pipeline a cada `SCHEDULE_INTERVAL_MINUTES` (padrão 5; 0 = uma
 vez). O CSV de saída é **acumulado** e serve de histórico: viagem + pool já `FINALIZADO` nunca é
 cadastrada de novo na Vibra - se o portal ainda a devolve (retorno falhou), só o resultado é
@@ -116,6 +169,9 @@ HIDRATADO COMBUSTIVEL"), confere capacidade e compartimento vazio, carrega e con
 **Pendências:**
 - Tela de erro depois do "Finalizar" não confirmada via DOM: erros procurados em
   `.alert-danger`/`.ui-messages-error`. Motorista não é informado em nenhuma tela vista até aqui.
+- Fila de edição: telas Consultar / Alterar Programação **não confirmadas via DOM** (seletores do
+  protótipo, por rótulo/texto): modal 'Alterar', a Pesquisa de Remessas da alteração, o botão final
+  da alteração e se o horário da própria programação aparece livre no Agendamento.
 - Saldo insuficiente / produto em análise (ER: reverte para `planned` sem erro) ainda não é
   identificado na Vibra: hoje cai em "pedido não disponível na Lista de Remessas" (`scheduling_error`).
 - Preencher `VIBRA_TOKEN_API_TOKEN` (= `API_TOKEN` do serviço `bindi_email_token_reader` no
@@ -158,6 +214,20 @@ Agendamento          Bootstrap Datepicker inline #datepickid .datepicker-days: t
                      th.datepicker-switch 'Novembro 2026') - clicar sempre no dia;
                      select#combo_horarios (option value "16:00", texto "06/11/2026 - 16:00",
                      onchange mojarra.ab); a#botao_cria1 'Finalizar'
+Consulta (edição)    rótulos 'Data Programada' (2 inputs), 'Cliente'; Base = select2 #formConProgcmbBase
+                     ('BABET (5025) - BETIM - MG'; confirmado via DOM); botão 'Pesquisar
+                     Programações'; sem resultado = aviso 'Nenhuma programação foi encontrada.'
+                     Linhas tr#formConProg:tblProgramacoesMD:N:row (nº em qualquer td); lápis =
+                     <a onclick="mojarra.ab(...openDialogModalAlterar)"> com button[title='Alterar
+                     Programação'] > i.fa-pencil-square-o (confirmado via DOM; clicar no <a>).
+                     Lixeira: span#...:roleExcluirProgramacao > a (onclick confirmDialog) >
+                     button[title='Excluir Programação']; modal #formConProg:confirmDialog >
+                     a#formConProg:btnExcluir 'Excluir' (confirmados via DOM).
+                     Modal 'Alterar' e Pesquisa de Remessas da alteração não confirmados via DOM
+Alterar Compartim.   (confirmado via DOM) 'Placa: X' e Transportador em texto fixo; #comboPool;
+                     carregado: td Ação > a[title='Excluir produto do compartimento'] (onclick
+                     mojarra '@form') > button.btn-danger (lixeira); vazio: 'Vazio' + select de
+                     capacidade; botão verde 'Continuar' (rolar até ele)
 Protocolo            'Programação criada com sucesso!' + h2 'Número da Programação : 4041588304 -
                      19/11/2026 18:15' (vai no detail do CSV como 'Programação Vibra nº N')
 ```
@@ -173,15 +243,16 @@ Python 3.11+, `selenium`, `python-dotenv`, `requests`.
 ### Estrutura de pastas do projeto
 ```
 ├── main.py                          ← orquestrador (INIT → GET_DATA → PROCESS → END) em loop
-├── vibra_programacao.py             ← protótipo original (referência)
+├── vibra_programacao.py             ← protótipo original do cadastro (referência)
+├── vibra_edicao.py                  ← protótipo original da edição (referência; integrado ao pipeline)
 ├── Framework/
 │   ├── InitModule.py                ← valida .env, credenciais e pré-requisitos
-│   ├── GetDataModule.py             ← pedidos planejados do portal (ou PROGRAMACOES_PATH)
-│   ├── ProcessModule.py             ← login → para cada programação abre o cadastro e preenche
+│   ├── GetDataModule.py             ← pedidos planejados + fila de edição do portal (ou mocks/CSV)
+│   ├── ProcessModule.py             ← login → cadastra as programações, depois edita as da fila
 │   ├── EndModule.py                 ← finalização (fecha o CSV, imprime resumo)
 │   └── RPAFrameworkException.py     ← exceção controlada
 ├── Automation/
-│   └── VibraPortal.py               ← passos Selenium (login + Programação FOB)
+│   └── VibraPortal.py               ← passos Selenium (login + Programação FOB Cadastrar/Consultar)
 ├── Utils/
 │   ├── DriverFactory.py             ← cria o Chrome WebDriver + persiste cookies do SSO
 │   ├── TokenApiClient.py            ← cliente da Vibra Token API (código de 2FA do e-mail)
@@ -189,6 +260,7 @@ Python 3.11+, `selenium`, `python-dotenv`, `requests`.
 ├── Log/
 │   └── LogModule.py                 ← grava o resultado em programacoes_vibra.csv
 ├── programacoes.example.csv
+├── planejados.example.json / edicoes.example.json   ← mocks do portal
 ├── Dockerfile / railway.json / .dockerignore   ← deploy no Railway
 ├── requirements.txt
 ├── .env                              ← não versionar

@@ -1,0 +1,42 @@
+{
+  "trips": [
+    {
+      "tripId": 9001,
+      "isEdit": true,
+      "editRequestId": 1,
+      "distributorReference": "4041588304",
+      "editRequestedAt": "2026-11-24T12:00:00.000Z",
+      "distributorScheduledTime": "10:00",
+      "loadDate": "2026-11-26",
+      "loadTime": "10:00",
+      "tractorPlate": "HNY7I09",
+      "trailerPlates": [
+        "HNY7I09"
+      ],
+      "driverName": "Anderson Fabiano Lopes",
+      "driverTaxId": "00000000000",
+      "orders": [
+        {
+          "orderId": 291,
+          "orderNumber": "PD-2026-000291",
+          "distributorOrderNumber": "0265807114",
+          "stationName": "Rede Zeppe - São José",
+          "stationDistributorName": "POSTO ZEPPE SAO JOSE",
+          "items": [
+            {
+              "orderItemId": 1,
+              "productName": "Etanol Hidratado",
+              "qtyM3": 15,
+              "compartments": [
+                {
+                  "number": 5,
+                  "capacityM3": 3
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

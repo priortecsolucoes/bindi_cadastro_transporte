@@ -14,6 +14,14 @@ from Framework.RPAFrameworkException import RPAFrameworkException
 
 STATUS_FILLED = "PREENCHIDO"
 STATUS_FINALIZED = "FINALIZADO"
+# Programação já cadastrada alterada na Vibra (fila de edição do portal).
+STATUS_EDITED = "EDITADO"
+# Edição em que a data/horário mudou: a programação antiga foi excluída na Vibra (a
+# alteração não muda data/horário) e uma nova vai ser cadastrada. Marca no histórico para
+# a próxima tentativa não procurar a programação que já não existe.
+STATUS_SCHEDULE_DELETED = "EXCLUIDO"
+SCHEDULE_DELETED_LABEL = "Programação excluída para recriar nº"
+SCHEDULE_DELETED_IN_DETAIL = re.compile(re.escape(SCHEDULE_DELETED_LABEL) + r" (\d+)")
 # Erro técnico: a programação é tentada de novo no próximo ciclo (ver GetDataModule).
 STATUS_ERROR = "ERRO"
 # Erro informado ao Portal Bindi Log ('Erro no agendamento'): o usuário corrige a
@@ -27,6 +35,10 @@ SCHEDULE_NUMBER_IN_DETAIL = re.compile(re.escape(SCHEDULE_NUMBER_LABEL) + r" (\d
 # Horário aceito pela Vibra (pode ser o livre mais próximo do planejado): "Agendado 2026-11-20 13:30".
 SCHEDULED_LABEL = "Agendado"
 SCHEDULED_TIME_IN_DETAIL = re.compile(re.escape(SCHEDULED_LABEL) + r" \d{4}-\d{2}-\d{2} (\d{2}:\d{2})")
+# Linha da fila de edição: o histórico dela é por pedido de edição (não por viagem +
+# posto), para um EDITADO não ser confundido com o cadastro nem bloquear a próxima edição.
+EDIT_REQUEST_LABEL = "Pedido de edição nº"
+EDIT_REQUEST_IN_DETAIL = re.compile(re.escape(EDIT_REQUEST_LABEL) + r" (\d+)")
 
 
 def output_path() -> str:
@@ -89,7 +101,8 @@ class LogModule:
         total = sum(self._status_count.values())
         print(
             f"[OK] {total} programação(ões) desta execução gravada(s) em {self._output_path} "
-            f"({self._status_count[STATUS_FINALIZED]} finalizada(s), {self._status_count[STATUS_FILLED]} só preenchida(s), "
+            f"({self._status_count[STATUS_FINALIZED]} finalizada(s), {self._status_count[STATUS_EDITED]} editada(s), "
+            f"{self._status_count[STATUS_FILLED]} só preenchida(s), "
             f"{self._status_count[STATUS_ERROR_REPORTED]} com erro enviado ao portal, "
             f"{self._status_count[STATUS_ERROR]} com erro técnico)."
         )

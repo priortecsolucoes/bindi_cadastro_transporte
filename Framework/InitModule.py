@@ -13,6 +13,9 @@ from Utils.TokenApiClient import check_health
 
 DEFAULT_TOKEN_API_URL = "https://emailtokenreader.up.railway.app"
 DEFAULT_COMPANY = "10076 - POSTO ZEPPE SAO JOSE LTDA"
+DEFAULT_EDIT_SEARCH_DAYS = 15
+# Base de carregamento da BindiLog na Vibra (combo Base da Consulta abre com outra).
+DEFAULT_VIBRA_BASE = "BABET"
 
 
 @dataclass
@@ -27,6 +30,7 @@ class BotConfig:
     chrome_window_size: Optional[str]
     schedules_path: Optional[str]
     planned_mock_path: Optional[str]
+    edit_mock_path: Optional[str]
     carrier: str
     company: str
     mfa_wait_seconds: int
@@ -36,6 +40,8 @@ class BotConfig:
     portal_api_url: str
     portal_api_token: str
     portal_pending_days: int
+    vibra_base: Optional[str]
+    edit_search_days: int
 
 
 def initialize() -> BotConfig:
@@ -62,6 +68,24 @@ def initialize() -> BotConfig:
         raise RPAFrameworkException(
             f"PLANEJADOS_MOCK_PATH está definido ({planned_mock_path}) mas o arquivo não existe."
         )
+
+    edit_mock_path = os.environ.get("EDICOES_MOCK_PATH", "").strip() or None
+    if edit_mock_path and not os.path.isfile(edit_mock_path):
+        raise RPAFrameworkException(
+            f"EDICOES_MOCK_PATH está definido ({edit_mock_path}) mas o arquivo não existe."
+        )
+
+    # Consulta de Programações (fila de edição): Base do filtro (VIBRA_BASE=0 mantém a
+    # que a Vibra já traz) e quantos dias à frente de hoje a pesquisa cobre - a
+    # programação a alterar está na data antiga, que pode não ser a da viagem editada.
+    raw_vibra_base = os.environ.get("VIBRA_BASE", "").strip() or DEFAULT_VIBRA_BASE
+    vibra_base = None if raw_vibra_base == "0" else raw_vibra_base
+    raw_edit_days = os.environ.get("VIBRA_EDIT_SEARCH_DAYS", "").strip() or str(DEFAULT_EDIT_SEARCH_DAYS)
+    if not raw_edit_days.isdigit() or int(raw_edit_days) < 1:
+        raise RPAFrameworkException(
+            f"VIBRA_EDIT_SEARCH_DAYS deve ser um inteiro positivo (dias); valor recebido: {raw_edit_days!r}"
+        )
+    edit_search_days = int(raw_edit_days)
 
     # A transportadora é sempre a própria Bindi Log - só muda se o nome no combo da Vibra mudar.
     carrier = os.environ.get("VIBRA_TRANSPORTADOR", "").strip() or "BINDI"
@@ -147,6 +171,7 @@ def initialize() -> BotConfig:
         chrome_window_size=chrome_window_size,
         schedules_path=schedules_path,
         planned_mock_path=planned_mock_path,
+        edit_mock_path=edit_mock_path,
         carrier=carrier,
         company=company,
         mfa_wait_seconds=mfa_wait_seconds,
@@ -156,4 +181,6 @@ def initialize() -> BotConfig:
         portal_api_url=portal_api_url,
         portal_api_token=portal_api_token,
         portal_pending_days=portal_pending_days,
+        vibra_base=vibra_base,
+        edit_search_days=edit_search_days,
     )

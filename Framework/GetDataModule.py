@@ -4,7 +4,9 @@ viagem (compartimentos de postos diferentes entram na mesma programação, troca
 o Pool na Vibra). O histórico continua por viagem + posto. Overrides para testes: PLANEJADOS_MOCK_PATH (JSON no
 mesmo formato da resposta do portal - simula viagens planejadas) e
 PROGRAMACOES_PATH (CSV local, colunas pool, placa e opcionalmente transportador).
-Nunca escreve."""
+Depois dos cadastros vem a fila de edição do portal (GET /api/rpa/vibra/edicoes,
+ou EDICOES_MOCK_PATH): viagens já cadastradas que foram alteradas, uma por
+viagem, com "isEdit". Nunca escreve."""
 
 import csv
 import json
@@ -13,8 +15,19 @@ from typing import Dict, List, Optional
 
 from Framework.InitModule import BotConfig
 from Framework.RPAFrameworkException import RPAFrameworkException
-from Log.LogModule import SCHEDULE_NUMBER_IN_DETAIL, SCHEDULED_TIME_IN_DETAIL, STATUS_ERROR, STATUS_ERROR_REPORTED, STATUS_FINALIZED, output_path
-from Utils.PortalClient import fetch_planned_trips
+from Log.LogModule import (
+    EDIT_REQUEST_IN_DETAIL,
+    SCHEDULE_DELETED_IN_DETAIL,
+    SCHEDULE_NUMBER_IN_DETAIL,
+    SCHEDULED_TIME_IN_DETAIL,
+    STATUS_EDITED,
+    STATUS_ERROR,
+    STATUS_ERROR_REPORTED,
+    STATUS_FINALIZED,
+    STATUS_SCHEDULE_DELETED,
+    output_path,
+)
+from Utils.PortalClient import fetch_edit_trips, fetch_planned_trips
 
 REQUIRED_CSV_COLUMNS = ("pool", "placa")
 
@@ -27,7 +40,10 @@ def get_data(config: BotConfig) -> List[dict]:
     "orders" (pedidos da viagem, com itens, compartimentos e "vibraPool"),
     "reportToPortal" (False no mock) e "technicalErrors" (erros técnicos seguidos
     no histórico). Posto já FINALIZADO na viagem vem num item próprio, com
-    "alreadyFinalized" e "scheduleNumber", só para reenviar o resultado ao portal."""
+    "alreadyFinalized" e "scheduleNumber", só para reenviar o resultado ao portal.
+    Os itens da fila de edição vêm por último, com "isEdit", "editRequestId" e
+    "scheduleNumber" (programação a alterar); edição já EDITADA no histórico vem
+    com "alreadyEdited", só para reenviar o resultado."""
     if config.schedules_path:
         return _load_from_csv(config.schedules_path, config.carrier)
 
@@ -94,7 +110,87 @@ def get_data(config: BotConfig) -> List[dict]:
             f"(histórico em {history_path})."
         )
     print(f"[OK] {len(trips_to_register)} programação(ões) a registrar na Vibra.")
-    return pending
+    return pending + _load_edit_items(config, history)
+
+
+def _load_edit_items(config: BotConfig, history: Dict[tuple, dict]) -> List[dict]:
+    """Fila de edição: uma programação por viagem (todos os postos), como no cadastro.
+    Em simulação (PLANEJADOS_MOCK_PATH) o portal não é consultado; EDICOES_MOCK_PATH
+    simula a fila."""
+    if config.edit_mock_path:
+        trips = _load_mock_trips(config.edit_mock_path, "fila de edição", "EDICOES_MOCK_PATH")
+        from_portal = False
+    elif config.planned_mock_path:
+        return []
+    else:
+        trips = fetch_edit_trips(config.portal_api_url, config.portal_api_token)
+        from_portal = True
+
+    items: List[dict] = []
+    already_edited = 0
+    for trip in trips:
+        if not trip.get("editRequestId"):
+            raise RPAFrameworkException(f"Viagem {trip.get('tripId')} da fila de edição sem editRequestId: {trip}")
+        if not trip.get("distributorReference"):
+            # Sem o número não há como achar a programação na Consulta da Vibra.
+            print(
+                f"[AVISO] Viagem {trip['tripId']} (edição {trip['editRequestId']}): portal não informou o número "
+                "da programação na Vibra - a edição vai falhar e o erro volta para o portal."
+            )
+        plates = _vibra_plates(trip)
+        pools: Dict[str, List[dict]] = {}
+        for order in trip.get("orders", []):
+            pool = order.get("stationDistributorName") or order.get("stationName")
+            if not pool:
+                print(f"[AVISO] Viagem {trip['tripId']}, pedido {order.get('orderNumber')}: portal não informou o posto - ignorado.")
+                continue
+            pools.setdefault(pool, []).append({**order, "vibraPool": pool})
+        if not pools:
+            print(f"[AVISO] Viagem {trip['tripId']} (edição {trip['editRequestId']}): nenhum pedido com posto - ignorada.")
+            continue
+
+        edit_history = history.get(_edit_key(trip["editRequestId"]), {})
+        item = {
+            **_build_item(" / ".join(pools), plates[0], config.carrier),
+            "plates": plates,
+            "tripId": trip["tripId"],
+            "loadDate": trip.get("loadDate"),
+            "loadTime": trip.get("loadTime"),
+            "tractorPlate": trip.get("tractorPlate"),
+            "trailerPlates": trip.get("trailerPlates", []),
+            "driverName": trip.get("driverName"),
+            "driverTaxId": trip.get("driverTaxId"),
+            "orders": [order for orders in pools.values() for order in orders],
+            "pools": [{"pool": pool, "orders": orders} for pool, orders in pools.items()],
+            "isEdit": True,
+            "editRequestId": trip["editRequestId"],
+            "scheduleNumber": str(trip.get("distributorReference") or ""),
+            "reportToPortal": from_portal,
+            "technicalErrors": edit_history.get("technical_errors", 0),
+            # Programação antiga já excluída numa tentativa anterior: só falta cadastrar a nova.
+            "scheduleDeleted": edit_history.get("deleted_schedule", ""),
+            # Horário aceito pela Vibra no cadastro; nulo = carregamento alterado depois.
+            "distributorScheduledTime": trip.get("distributorScheduledTime"),
+        }
+        if edit_history.get("finalized"):
+            already_edited += 1
+            if not from_portal:
+                continue
+            # Já alterada na Vibra, mas o retorno ao portal não chegou: só reenvia.
+            item["alreadyEdited"] = True
+            item["scheduleNumber"] = edit_history.get("schedule_number") or item["scheduleNumber"]
+            item["scheduledTime"] = edit_history.get("scheduled_time", "")
+        items.append(item)
+
+    if already_edited:
+        action = "só o resultado será reenviado ao portal" if from_portal else "ignorada(s)"
+        print(f"[INFO] {already_edited} edição(ões) já EDITADA(S) na Vibra - {action}.")
+    print(f"[OK] {len(items) - (already_edited if from_portal else 0)} programação(ões) a editar na Vibra.")
+    return items
+
+
+def _edit_key(edit_request_id) -> tuple:
+    return "EDIT", str(edit_request_id).strip()
 
 
 def _merge_into_trip(trips: Dict[str, dict], item: dict) -> None:
@@ -126,11 +222,11 @@ def _load_history(history_path: str) -> Dict[tuple, dict]:
             for row in csv.DictReader(file):
                 if not row.get("trip_id"):
                     continue
-                entry = history.setdefault(
-                    _item_key(row["trip_id"], row.get("pool", "")), {"finalized": False, "technical_errors": 0}
-                )
+                edit_request = EDIT_REQUEST_IN_DETAIL.search(row.get("detail") or "")
+                key = _edit_key(edit_request.group(1)) if edit_request else _item_key(row["trip_id"], row.get("pool", ""))
+                entry = history.setdefault(key, {"finalized": False, "technical_errors": 0})
                 status = row.get("status")
-                if status == STATUS_FINALIZED:
+                if status in (STATUS_FINALIZED, STATUS_EDITED):
                     entry["finalized"] = True
                     number = SCHEDULE_NUMBER_IN_DETAIL.search(row.get("detail") or "")
                     if number:
@@ -138,6 +234,9 @@ def _load_history(history_path: str) -> Dict[tuple, dict]:
                     scheduled = SCHEDULED_TIME_IN_DETAIL.search(row.get("detail") or "")
                     if scheduled:
                         entry["scheduled_time"] = scheduled.group(1)
+                elif status == STATUS_SCHEDULE_DELETED:
+                    deleted = SCHEDULE_DELETED_IN_DETAIL.search(row.get("detail") or "")
+                    entry["deleted_schedule"] = deleted.group(1) if deleted else "?"
                 elif status == STATUS_ERROR:
                     entry["technical_errors"] += 1
                 elif status == STATUS_ERROR_REPORTED:
@@ -168,18 +267,18 @@ def _normalize_plate(plate: str) -> str:
     return plate.strip().upper().replace("-", "")
 
 
-def _load_mock_trips(mock_path: str) -> List[dict]:
+def _load_mock_trips(mock_path: str, kind: str = "viagens planejadas", env_name: str = "PLANEJADOS_MOCK_PATH") -> List[dict]:
     try:
         with open(mock_path, encoding="utf-8-sig") as file:
             trips = json.load(file).get("trips", [])
     except (OSError, ValueError, AttributeError) as exc:
-        raise RPAFrameworkException(f"Falha ao ler o mock de viagens planejadas {mock_path}: {exc}") from exc
+        raise RPAFrameworkException(f"Falha ao ler o mock de {kind} {mock_path}: {exc}") from exc
     for trip in trips:
         if not trip.get("tripId") or not (trip.get("trailerPlates") or trip.get("tractorPlate")):
             raise RPAFrameworkException(
                 f"{mock_path}: toda viagem precisa de tripId e trailerPlates (ou tractorPlate) ({trip})."
             )
-    print(f"[AVISO] SIMULAÇÃO: {len(trips)} viagem(ns) lida(s) de {mock_path} (PLANEJADOS_MOCK_PATH) - portal não consultado.")
+    print(f"[AVISO] SIMULAÇÃO: {len(trips)} viagem(ns) ({kind}) lida(s) de {mock_path} ({env_name}) - portal não consultado.")
     return trips
 
 
