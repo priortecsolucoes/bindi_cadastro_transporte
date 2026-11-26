@@ -133,6 +133,8 @@ def _load_deletion_items(config: BotConfig, history: Dict[tuple, dict]) -> List[
             "pool": "-",
             "pools": [],
             "plate": deletion.get("tractorPlate") or "",
+            # Postos da programação: o Cliente da Consulta da Vibra é escolhido por eles.
+            "stations": deletion.get("stations") or [],
             "carrier": "",
             "orders": [],
             "reportToPortal": True,

@@ -242,10 +242,7 @@ def _edit_trip(driver, main_handle: str, config: BotConfig, item: dict, log_modu
     company = select_company(driver, config.company)
     open_fob_query(driver)
     date_from, date_to = _edit_search_window(item["loadDate"], config.edit_search_days)
-    # Na Consulta o Cliente é a unidade ativa; o diálogo de troca mostra o nome sem o código.
-    current = find_schedule(
-        driver, old_number, date_from, date_to, config.vibra_base, config.company.split(" - ", 1)[-1].strip()
-    )
+    current = find_schedule(driver, old_number, date_from, date_to, config.vibra_base, _query_clients(item))
 
     change = _schedule_change(item, current)
     if change:
@@ -303,9 +300,16 @@ def _delete_trip_schedule(driver, main_handle: str, config: BotConfig, item: dic
     go_home(driver, main_handle)
     company = select_company(driver, config.company)
     open_fob_query(driver)
-    date_from, date_to = _edit_search_window(item["loadDate"], config.edit_search_days)
+    clients = _query_clients(item)
+    if clients:
+        date_from, date_to = _edit_search_window(item["loadDate"], config.edit_search_days)
+    else:
+        # Sem os postos, find_schedule procura em todos os clientes da Consulta: só a fatia
+        # de 5 dias em volta da data de carga, senão seriam dezenas de pesquisas por cliente.
+        load_date = date.fromisoformat(item["loadDate"])
+        date_from, date_to = load_date - timedelta(days=2), load_date + timedelta(days=2)
     try:
-        find_schedule(driver, number, date_from, date_to, config.vibra_base, config.company.split(" - ", 1)[-1].strip())
+        find_schedule(driver, number, date_from, date_to, config.vibra_base, clients)
     except ScheduleNotFoundError:
         note = (
             f"Programação {number} não encontrada na Consulta da Vibra ({date_from:%d/%m/%Y} a {date_to:%d/%m/%Y}) "
@@ -317,6 +321,31 @@ def _delete_trip_schedule(driver, main_handle: str, config: BotConfig, item: dic
     delete_schedule(driver, number)
     detail = f"{DELETION_REQUEST_LABEL} {item['deletionRequestId']} | Programação {number} excluída na Vibra"
     return company, {}, STATUS_SCHEDULE_DELETED, detail, number, "", ""
+
+
+def _query_clients(item: dict) -> List[dict]:
+    """Postos da programação, o 1º Pool primeiro: na Consulta da Vibra o Cliente é o
+    posto, e a programação só aparece com o Cliente dela selecionado (find_schedule
+    tenta um por um). Edição: dos pedidos da viagem; exclusão: dos postos que o portal
+    devolve no pedido de exclusão."""
+    if item.get("isDeletion"):
+        stations = item.get("stations") or []
+    else:
+        stations = [
+            {
+                "taxId": order.get("stationTaxId"),
+                "name": order.get("stationName"),
+                "distributorName": order.get("stationDistributorName"),
+            }
+            for part in item.get("pools") or []
+            for order in part.get("orders", [])
+        ]
+    clients: List[dict] = []
+    for station in stations:
+        key = station.get("taxId") or station.get("distributorName") or station.get("name")
+        if key and key not in [c.get("taxId") or c.get("distributorName") or c.get("name") for c in clients]:
+            clients.append(station)
+    return clients
 
 
 def _schedule_change(item: dict, current: dict) -> str:

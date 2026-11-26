@@ -1144,6 +1144,13 @@ QUERY_DATE_LABEL = "Data Programada"
 # Combo Base (select2, confirmado via DOM): abre com outra base (ex.: AIBET) e precisa ser
 # trocado; opções no formato "BABET (5025) - BETIM - MG".
 QUERY_BASE_SELECT_ID = "formConProgcmbBase"
+# Combo Cliente (select2, confirmado via DOM): é o POSTO da programação, e a Consulta só
+# mostra as programações do cliente selecionado. Opções "17.272.550/0001-62 - POSTO ZEPPE SAO
+# JOSE LTDA - BABET": casa pelo CNPJ do posto (stationTaxId do portal) ou, sem ele, pelo nome.
+QUERY_CLIENT_SELECT_ID = "formConProg:cmbCliente"
+# select2 aberto (o dropdown fica no fim do <body>, fora do combo).
+SELECT2_OPEN_SEARCH_XPATH = "//span[contains(@class,'select2-container--open')]//input[contains(@class,'select2-search__field')]"
+SELECT2_OPEN_RESULTS_XPATH = "//span[contains(@class,'select2-container--open')]//li[contains(@class,'select2-results__option')]"
 # Resultado (confirmado via DOM): tr#formConProg:tblProgramacoesMD:N:row; o lápis é um
 # <a onclick="mojarra.ab(...openDialogModalAlterar)"> com button[title='Alterar Programação']
 # e i.fa-pencil-square-o dentro - o clique tem que ser no <a>, dono do onclick.
@@ -1208,11 +1215,19 @@ def open_fob_query(driver: webdriver.Chrome) -> None:
 
 
 def search_schedules(
-    driver: webdriver.Chrome, date_from: date, date_to: date, base: Optional[str], client: Optional[str]
-) -> None:
-    """Filtros da Consulta: Data Programada de/até, Base e Cliente (vazios = mantém
-    o que a Vibra já traz) > 'Pesquisar Programações'. A Vibra não aceita intervalo
-    maior que 5 dias - intervalos maiores são divididos em open_schedule_for_edit."""
+    driver: webdriver.Chrome,
+    date_from: date,
+    date_to: date,
+    base: Optional[str],
+    client: Optional[Dict[str, str]],
+) -> str:
+    """Filtros da Consulta: Data Programada de/até, Base e Cliente > 'Pesquisar
+    Programações'. A lista do Cliente depende da Base, então ele é escolhido DEPOIS
+    dela, pela busca do select2 (select_query_client). client = posto {"taxId", "name",
+    "distributorName"}; None = mantém o cliente da tela. Devolve o texto do Cliente
+    selecionado. Levanta ClientNotFoundError se o posto não aparecer na busca. A Vibra
+    não aceita intervalo maior que 5 dias - intervalos maiores são divididos em
+    find_schedule."""
     if date_to < date_from or (date_to - date_from).days > MAX_QUERY_RANGE_DAYS - 1:
         raise ValueError(
             f"Intervalo da Consulta inválido: {date_from:%d/%m/%Y} a {date_to:%d/%m/%Y} "
@@ -1221,7 +1236,7 @@ def search_schedules(
     print(
         f"[INFO] Consulta: Data Programada {date_from:%d/%m/%Y} a {date_to:%d/%m/%Y}"
         + (f" | Base {base}" if base else "")
-        + (f" | Cliente {client}" if client else "")
+        + (f" | Cliente {client.get('name') or client.get('taxId')}" if client else "")
     )
     _fill_date(driver, _input_after_label(driver, QUERY_DATE_LABEL, 1), f"{date_from:%d/%m/%Y}")
     _fill_date(driver, _input_after_label(driver, QUERY_DATE_LABEL, 2), f"{date_to:%d/%m/%Y}")
@@ -1231,10 +1246,10 @@ def search_schedules(
             _wait_ajax_idle(driver)
         else:
             _select_by_label(driver, "Base", base)
-    if client:
-        _select_by_label(driver, "Cliente", client)
+    selected_client = select_query_client(driver, client) if client else ""
     _click_by_text(driver, QUERY_SEARCH_BUTTON_TEXT)
     _wait_ajax_idle(driver, SLOW_SCREEN_TIMEOUT)
+    return selected_client
 
 
 def find_schedule(
@@ -1243,37 +1258,189 @@ def find_schedule(
     date_from: date,
     date_to: date,
     base: Optional[str],
-    client: Optional[str],
+    clients: List[Dict[str, str]],
 ) -> Dict[str, str]:
-    """Pesquisa date_from..date_to em fatias de MAX_QUERY_RANGE_DAYS (limite da
-    Vibra) até achar a programação na Consulta (todas as páginas). Devolve a data
-    ("AAAA-MM-DD") e o horário ("HH:MM") da coluna Agendamento; a linha fica na
+    """Para cada posto da programação (clients: [{"taxId", "name", "distributorName"}],
+    o 1º Pool primeiro - a Vibra arquiva a programação no Cliente do posto), seleciona
+    o Cliente da Consulta e pesquisa date_from..date_to em fatias de
+    MAX_QUERY_RANGE_DAYS (limite da Vibra) até achar a programação (todas as
+    páginas). Posto que não aparece no Cliente (ex.: de outra Base) é pulado. Devolve
+    a data ("AAAA-MM-DD") e o horário ("HH:MM") da coluna Agendamento; a linha fica na
     tela para open_schedule_for_edit / delete_schedule."""
     if not schedule_number:
         raise RegistrationError(
             "O portal não informou o número da programação já cadastrada na Vibra - não há como "
             "localizá-la para alterar. Altere a programação manualmente na Vibra."
         )
-    window_start = date_from
-    while window_start <= date_to:
-        window_end = min(window_start + timedelta(days=MAX_QUERY_RANGE_DAYS - 1), date_to)
-        search_schedules(driver, window_start, window_end, base, client)
-        row = _find_schedule_row(driver, schedule_number)
-        if row is not None:
-            match = QUERY_SCHEDULE_PATTERN.search(row.text)
-            if not match:
-                raise RuntimeError(
-                    f"Programação {schedule_number} encontrada, mas sem data/hora na coluna Agendamento: '{row.text}'."
-                )
-            day, month, year = match.group(1).split("/")
-            print(f"[INFO] Programação {schedule_number} encontrada na Consulta: agendada em {match.group(1)} {match.group(2)}.")
-            return {"date": f"{year}-{month}-{day}", "time": match.group(2)}
-        window_start = window_end + timedelta(days=1)
+    if not clients:
+        clients = _all_query_clients(driver, base)
+        print(
+            f"[AVISO] O portal não informou os postos da programação {schedule_number} - procurando em todos os "
+            f"{len(clients)} cliente(s) da Consulta."
+        )
+    searched: List[str] = []
+    missing: List[str] = []
+    for client in clients:
+        client_label = client.get("name") or client.get("taxId") or "?"
+        window_start = date_from
+        try:
+            while window_start <= date_to:
+                window_end = min(window_start + timedelta(days=MAX_QUERY_RANGE_DAYS - 1), date_to)
+                search_schedules(driver, window_start, window_end, base, client)
+                row = _find_schedule_row(driver, schedule_number)
+                if row is not None:
+                    match = QUERY_SCHEDULE_PATTERN.search(row.text)
+                    if not match:
+                        raise RuntimeError(
+                            f"Programação {schedule_number} encontrada, mas sem data/hora na coluna Agendamento: '{row.text}'."
+                        )
+                    day, month, year = match.group(1).split("/")
+                    print(f"[INFO] Programação {schedule_number} encontrada na Consulta: agendada em {match.group(1)} {match.group(2)}.")
+                    return {"date": f"{year}-{month}-{day}", "time": match.group(2)}
+                window_start = window_end + timedelta(days=1)
+        except ClientNotFoundError as exc:
+            print(f"[AVISO] {exc} - pesquisando nos demais postos da programação.")
+            missing.append(client_label)
+            continue
+        searched.append(client_label)
+
+    if not searched:
+        raise RegistrationError(
+            f"Nenhum posto da programação {schedule_number} aparece no Cliente da Consulta de Programações da Vibra "
+            f"({', '.join(missing)}). Confira o CNPJ do posto no portal e a Base (VIBRA_BASE).",
+        )
     raise ScheduleNotFoundError(
         f"Programação {schedule_number} não encontrada na Consulta da Vibra (Data Programada de "
-        f"{date_from:%d/%m/%Y} a {date_to:%d/%m/%Y}). Pode ter sido cancelada ou ter data fora desse "
-        "intervalo - confira na Vibra e altere manualmente se precisar."
+        f"{date_from:%d/%m/%Y} a {date_to:%d/%m/%Y}; cliente(s): {'; '.join(searched)}). Pode ter sido "
+        "cancelada ou ter data fora desse intervalo - confira na Vibra e altere manualmente se precisar."
     )
+
+
+def _all_query_clients(driver: webdriver.Chrome, base: Optional[str]) -> List[Dict[str, str]]:
+    """Todos os clientes do combo da Consulta na Base informada (a lista depende dela) -
+    usado quando o portal não informa os postos da programação."""
+    if base and driver.find_elements(By.ID, QUERY_BASE_SELECT_ID):
+        _select_select2(driver, QUERY_BASE_SELECT_ID, base)
+        _wait_ajax_idle(driver)
+    try:
+        WebDriverWait(driver, DEFAULT_TIMEOUT).until(lambda d: d.find_elements(By.ID, QUERY_CLIENT_SELECT_ID))
+    except TimeoutException as exc:
+        raise RuntimeError(f"Combo Cliente (#{QUERY_CLIENT_SELECT_ID}) não apareceu na Consulta.") from exc
+    options = driver.execute_script(
+        "var s = document.getElementById(arguments[0]);"
+        "return Array.from(s.options).map(function (o) { return o.text.trim(); }).filter(Boolean);",
+        QUERY_CLIENT_SELECT_ID,
+    )
+    clients = []
+    for option in options:
+        tax_id = re.sub(r"\D", "", option.split(" - ", 1)[0])
+        if len(tax_id) == 14:
+            clients.append({"taxId": tax_id, "name": option})
+    if not clients:
+        raise RuntimeError(f"Combo Cliente da Consulta sem opções com CNPJ (opções: {' / '.join(options[:10])}).")
+    return clients
+
+
+class ClientNotFoundError(RuntimeError):
+    """Posto não aparece na busca do combo Cliente da Consulta (com a Base atual)."""
+
+
+def select_query_client(driver: webdriver.Chrome, client: Dict[str, str]) -> str:
+    """Combo Cliente (select2 #formConProg:cmbCliente), como o usuário faz: clica no
+    combo, digita no campo de busca e clica no resultado. Busca primeiro pelo CNPJ
+    formatado ("20.777.504/0001-20", início da opção) e depois pelo nome do posto;
+    o resultado tem que bater com o CNPJ ou conter o nome. Devolve o texto selecionado."""
+    tax_id = re.sub(r"\D", "", client.get("taxId") or "")
+    names = [n for n in (client.get("distributorName"), client.get("name")) if n and n.strip()]
+    if _client_matches(_selected_client_text(driver), tax_id, names):
+        return _selected_client_text(driver)
+
+    terms = []
+    if len(tax_id) == 14:
+        terms.append(f"{tax_id[:2]}.{tax_id[2:5]}.{tax_id[5:8]}/{tax_id[8:12]}-{tax_id[12:]}")
+    terms += [_normalize_text(n) for n in names]
+    seen_results: List[str] = []
+    for term in dict.fromkeys(terms):
+        results = _select2_search(driver, QUERY_CLIENT_SELECT_ID, term)
+        seen_results += [text for text, _ in results]
+        for text, element in results:
+            if _client_matches(text, tax_id, names):
+                _scroll_and_click(driver, element)
+                _wait_ajax_idle(driver)
+                selected = _selected_client_text(driver)
+                if not _client_matches(selected, tax_id, names):
+                    raise RuntimeError(f"Cliente ficou em '{selected}' depois de clicar em '{text}'.")
+                print(f"[OK]   -> Cliente: {selected}")
+                return selected
+    _close_select2(driver)
+    raise ClientNotFoundError(
+        f"Posto '{names[0] if names else '-'}' (CNPJ {client.get('taxId') or '-'}) não aparece no Cliente da Consulta"
+        + (f" (resultados: {' / '.join(dict.fromkeys(seen_results))})" if seen_results else "")
+    )
+
+
+def _client_matches(text: str, tax_id: str, names: List[str]) -> bool:
+    if not text:
+        return False
+    if len(tax_id) == 14:
+        return re.sub(r"\D", "", text.split(" - ", 1)[0]) == tax_id
+    plain = _normalize_text(text)
+    return any(_normalize_text(name) in plain for name in names)
+
+
+def _selected_client_text(driver: webdriver.Chrome) -> str:
+    return driver.execute_script(
+        "var s = document.getElementById(arguments[0]);"
+        "return s && s.selectedIndex >= 0 ? s.options[s.selectedIndex].text.trim() : '';",
+        QUERY_CLIENT_SELECT_ID,
+    ) or ""
+
+
+def _select2_search(driver: webdriver.Chrome, select_id: str, term: str) -> list:
+    """Abre o select2 do <select id=select_id>, digita term no campo de busca e devolve
+    [(texto, elemento li)] dos resultados (vazio se nada for encontrado)."""
+    opener = driver.find_elements(
+        By.XPATH,
+        f"//select[@id={_xpath_literal(select_id)}]/following-sibling::span[contains(@class,'select2')][1]"
+        "//span[contains(@class,'select2-selection')][1]",
+    )
+    if not opener:
+        raise RuntimeError(f"select2 do combo #{select_id} não encontrado na tela.")
+    if not _first_visible(driver, SELECT2_OPEN_SEARCH_XPATH):
+        _scroll_and_click(driver, opener[0])
+    try:
+        search_field = WebDriverWait(driver, DEFAULT_TIMEOUT).until(lambda d: _first_visible(d, SELECT2_OPEN_SEARCH_XPATH))
+    except TimeoutException as exc:
+        raise RuntimeError(f"Campo de busca do combo #{select_id} não abriu após o clique.") from exc
+    search_field.send_keys(Keys.CONTROL, "a")
+    search_field.send_keys(Keys.DELETE)
+    search_field.send_keys(term)
+
+    def results_ready(d):
+        items = [
+            li for li in d.find_elements(By.XPATH, SELECT2_OPEN_RESULTS_XPATH)
+            if li.is_displayed() and li.text.strip()
+        ]
+        if any("loading-results" in (li.get_attribute("class") or "") for li in items):
+            return False
+        return items or False
+
+    try:
+        items = WebDriverWait(driver, DEFAULT_TIMEOUT, poll_frequency=0.3).until(results_ready)
+    except TimeoutException:
+        return []
+    time.sleep(0.3)  # o select2 filtra a cada tecla: relê depois da última
+    items = results_ready(driver) or []
+    return [
+        (li.text.strip(), li) for li in items
+        if "select2-results__message" not in (li.get_attribute("class") or "")
+    ]
+
+
+def _close_select2(driver: webdriver.Chrome) -> None:
+    field = _first_visible(driver, SELECT2_OPEN_SEARCH_XPATH)
+    if field:
+        field.send_keys(Keys.ESCAPE)
 
 
 def open_schedule_for_edit(driver: webdriver.Chrome, schedule_number: str) -> None:
@@ -1521,7 +1688,7 @@ def _vehicle_row_matches(vehicle_row, order_number: str, product_name: str) -> b
 
 def _close_open_modals(driver: webdriver.Chrome) -> None:
     driver.execute_script(
-        "if (window.jQuery) { jQuery('.modal.in').modal('hide'); }"
+        "if (window.jQuery && jQuery.fn && jQuery.fn.modal) { jQuery('.modal.in').modal('hide'); }"
         "document.querySelectorAll('.modal-backdrop').forEach(function (b) { b.remove(); });"
         "document.body.classList.remove('modal-open');"
     )

@@ -132,7 +132,16 @@ home > unidade > menu Programação > Programação FOB > **Consultar** > Data P
 `VIBRA_EDIT_SEARCH_DAYS` (padrão 15) à frente (a data antiga da programação não é guardada no
 portal) - a Vibra aceita no máximo **5 dias** por pesquisa (`MAX_QUERY_RANGE_DAYS`, dias
 inclusos), então a janela é pesquisada em fatias de 5 dias até achar a programação -, Base =
-`VIBRA_BASE` (padrão `BABET`, combo select2 `#formConProgcmbBase` que abre em outra base; `0` = mantém), Cliente = nome da `VIBRA_UNIDADE` > "Pesquisar Programações" > linha com o nº (pagina; `find_schedule` lê a coluna Agendamento "26/11/2026 01:00").
+`VIBRA_BASE` (padrão `BABET`, combo select2 `#formConProgcmbBase` que abre em outra base; `0` = mantém),
+**Cliente = o posto da programação** (combo select2 `#formConProg:cmbCliente`, opções "17.272.550/0001-62 -
+POSTO ZEPPE SAO JOSE LTDA - BABET"; a Consulta só lista as programações do cliente selecionado): escolhido
+pelo **CNPJ** do posto (`orders[].stationTaxId` de `planejados`/`edicoes`; na exclusão, `stations[]` do pedido
+de exclusão) ou, sem CNPJ igual, pelo nome. **A lista do Cliente depende da Base** (o JSF recarrega o combo
+ao trocar a Base): o Cliente é escolhido **depois** da Base, como o usuário faz (`select_query_client`): clica
+no select2, digita no campo de busca (CNPJ formatado "20.777.504/0001-20", depois o nome) e clica no
+resultado. `find_schedule` tenta os postos da viagem na ordem dos Pools, cada um com todas as fatias de
+datas; posto que não aparece no Cliente com essa Base (`ClientNotFoundError`, ex.: posto da AIBET) é
+pulado > "Pesquisar Programações" > linha com o nº (pagina; `find_schedule` lê a coluna Agendamento "26/11/2026 01:00").
 **A alteração da Vibra (lápis) não muda data/horário**, então `_schedule_change` decide:
 - **Data mudou** (Agendamento x `loadDate`) ou **horário mudou** (carregamento alterado no portal =
   `distributorScheduledTime` nulo, e Agendamento x `loadTime`): `delete_schedule` (lixeira da linha
@@ -240,7 +249,8 @@ Agendamento          Bootstrap Datepicker inline #datepickid .datepicker-days: t
                      th.datepicker-switch 'Novembro 2026') - clicar sempre no dia;
                      select#combo_horarios (option value "16:00", texto "06/11/2026 - 16:00",
                      onchange mojarra.ab); a#botao_cria1 'Finalizar'
-Consulta (edição)    rótulos 'Data Programada' (2 inputs), 'Cliente'; Base = select2 #formConProgcmbBase
+Consulta (edição)    rótulos 'Data Programada' (2 inputs); Cliente = select2 #formConProg:cmbCliente
+                     (posto; '17.272.550/0001-62 - POSTO ... - BABET'); Base = select2 #formConProgcmbBase
                      ('BABET (5025) - BETIM - MG'; confirmado via DOM); botão 'Pesquisar
                      Programações'; sem resultado = aviso 'Nenhuma programação foi encontrada.'
                      Linhas tr#formConProg:tblProgramacoesMD:N:row (nº em qualquer td); lápis =
