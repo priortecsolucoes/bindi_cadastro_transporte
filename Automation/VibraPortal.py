@@ -1028,9 +1028,23 @@ def _find_shipment_row(driver: webdriver.Chrome, order_number: str, product_name
             f"ordens na tela: {available}",
         )
 
-    wanted_words = _product_words(product_name)
-    matches = [entry for entry in same_order if wanted_words <= _product_words(entry[1])]
-    if not matches:
+    matches = [entry for entry in same_order if _product_matches(product_name, entry[1])]
+    if matches:
+        # Mais de um produto aceito (ex.: "Etanol Hidratado" x comum e aditivado): fica o
+        # mais próximo, sem trocar por outro produto se ele estiver sem saldo.
+        best_product = min((entry[1] for entry in matches), key=lambda p: _product_extra_words(product_name, p))
+        matches = [entry for entry in matches if entry[1] == best_product]
+    else:
+        additive_conflicts = [
+            entry[1] for entry in same_order
+            if _product_base_matches(product_name, entry[1]) and _product_conflicts_additive(product_name, entry[1])
+        ]
+        if additive_conflicts:
+            raise RegistrationError(
+                f"Pedido Vibra {order_number}: o pedido no portal é '{product_name}', mas a Vibra só tem "
+                f"{', '.join(sorted(set(additive_conflicts)))} nessa ordem (comum x aditivada). "
+                "Confira o produto do pedido."
+            )
         if len(same_order) > 1:
             raise RegistrationError(
                 f"Pedido Vibra {order_number}: produto '{product_name}' não identificado entre as remessas "
@@ -1172,6 +1186,43 @@ def _same_order_number(vibra_text: str, order_number: str) -> bool:
 def _product_words(name: str) -> set:
     plain = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode().upper()
     return set(re.findall(r"[A-Z0-9]+", plain))
+
+
+def _is_additive_word(word: str) -> bool:
+    # Vibra: "GASOLINA COMUM C ADIT PETROBRAS GRID", "ETANOL HIDRATADO ADITIV. PETROBRAS GRID";
+    # portal: "Gasolina Aditivada", "Diesel S10 Aditivado".
+    return word.startswith("ADIT") or word == "GRID"
+
+
+def _product_conflicts_additive(product_name: str, vibra_product: str) -> bool:
+    """Portal e Vibra discordam em aditivado x comum. "Gasolina Comum" está contido
+    em "GASOLINA COMUM C ADIT PETROBRAS GRID", então só a comparação de palavras
+    não basta. Portal sem nenhuma das duas indicações ("Diesel S10") aceita ambos."""
+    portal_words = _product_words(product_name)
+    vibra_additive = any(_is_additive_word(word) for word in _product_words(vibra_product))
+    if any(_is_additive_word(word) for word in portal_words):
+        return not vibra_additive
+    if "COMUM" in portal_words:
+        return vibra_additive
+    return False
+
+
+def _product_base_matches(product_name: str, vibra_product: str) -> bool:
+    """Palavras do portal (sem as de aditivado, que a Vibra abrevia) contidas no nome da Vibra."""
+    base_words = {word for word in _product_words(product_name) if not _is_additive_word(word)}
+    return base_words <= _product_words(vibra_product)
+
+
+def _product_matches(product_name: str, vibra_product: str) -> bool:
+    return _product_base_matches(product_name, vibra_product) and not _product_conflicts_additive(
+        product_name, vibra_product
+    )
+
+
+def _product_extra_words(product_name: str, vibra_product: str) -> int:
+    """Quanto menos palavras a mais na Vibra, mais próximo do produto do portal:
+    "Etanol Hidratado" fica com "ETANOL HIDRATADO COMBUSTIVEL" e não com o aditivado."""
+    return len(_product_words(vibra_product) - _product_words(product_name))
 
 
 def _visible_rows(driver: webdriver.Chrome, xpath: str) -> list:
@@ -1764,7 +1815,7 @@ def _vehicle_row_matches(vehicle_row, order_number: str, product_name: str) -> b
     product_text = (product_cell.get_attribute("textContent") or product_cell.text or "").strip()
     if not product_text or product_text.endswith(("...", "…")):
         return True
-    return _product_words(product_name) <= _product_words(product_text)
+    return _product_matches(product_name, product_text)
 
 
 def _close_open_modals(driver: webdriver.Chrome) -> None:
