@@ -100,6 +100,13 @@ um pedido dividido em várias viagens é cadastrado viagem a viagem.
 - Erro técnico (`RuntimeError`): tenta de novo nos próximos ciclos; na `MAX_TECHNICAL_ATTEMPTS`ª
   (3) seguida vai ao portal como erro com mensagem genérica de falha técnica.
 - Mock (`PLANEJADOS_MOCK_PATH`) e `PROGRAMACOES_PATH` não enviam nada ao portal.
+- **PROCESSANDO**: ao começar cada viagem (cadastro ou edição) o agente chama
+  `POST /api/rpa/vibra/processando` `{ tripId, processing: true, action: 'register'|'edit' }`
+  (`Utils/PortalClient.report_processing`; tabela `trip_rpa_processing`, migração 040 do portal) e,
+  ao terminar (sucesso ou erro), `processing: false`. `programacoes`/`edicoes` também limpam a marca.
+  No quadro de viagens aparece o selo PROCESSANDO no lugar de EDIÇÃO/ERRO; marca com mais de 30 min
+  é ignorada (agente caiu no meio). O quadro recarrega sozinho a cada 30 s se houver viagem liberada.
+  Falha nessa chamada só gera `[AVISO]`.
 ### Fila de edição (viagem já programada e alterada no portal)
 Origem: o protótipo `vibra_edicao.py` (standalone, lia do Postgres), integrado ao pipeline.
 No portal, reabrir + alterar + **liberar de novo** uma viagem que já tem nota de cadastro
@@ -151,6 +158,12 @@ pulado > "Pesquisar Programações" > linha com o nº (pagina; `find_schedule` l
   (`_register_trip`) > reporta a edição com o **número novo**. Se o cadastro novo falhar, a próxima
   tentativa vê o `EXCLUIDO` e só cadastra (a mensagem ao usuário avisa que a antiga já foi excluída).
   Horário diferente só porque a Vibra agendou no livre mais próximo **não** recria.
+- **Placa mudou** (conjunto trocado na viagem): exclui e cadastra uma nova, igual à mudança de
+  data/horário (`_delete_and_recreate`). Detectada **antes** do lápis por `_registered_plate`: placas
+  na linha da Consulta (`find_schedule` devolve `plates`, se a Vibra mostrar) ou a placa gravada no
+  CSV quando o agente cadastrou/editou a programação (`registeredPlate`, chave `("PLATE", nº)`).
+  Sem nenhuma das duas, a tela de alteração confere: `fill_edit_registration` levanta
+  `PlateChangedError` > volta à Consulta > exclui e recria.
 - **Senão** (só compartimentos/pedidos): lápis "Alterar Programação" >
 "Alterar" no modal > Pesquisa de Remessas > Pesquisar > "Alterar Programação - Compartimentação"
 (`fill_edit_registration`): placa e transportador vêm **fixos** (texto "Placa: QUT8C39", sem campo,
@@ -160,8 +173,9 @@ carregado que bate (ordem + produto) fica; o que diverge ou saiu da viagem é es
 (`unload_mismatched_compartments`, um por vez - o clique re-renderiza o `@form`); os novos/vazios são
 carregados pelo fluxo normal (`load_compartments`). Se só a data mudou, nada é esvaziado nem carregado >
 Agendamento com a data/horário atuais da programação (sem tela de horários, ou já selecionado =
-só conclui) > Finalizar (na edição aceita também 'Alterar'/'Salvar'/'Confirmar') > nº da programação
-(sem ele na tela, vale o original). Histórico no CSV: status `EDITADO`, uma linha por edição, com
+só conclui) > Finalizar (na edição aceita também 'Alterar'/'Salvar'/'Confirmar') > a Vibra volta
+para a Consulta com `div.alert-info` "Programação alterada com sucesso." (confirmado via DOM;
+`EDIT_SUCCESS_PATTERN`) - vira a mensagem enviada ao portal; não há Protocolo, então vale o nº original. Histórico no CSV: status `EDITADO`, uma linha por edição, com
 `Pedido de edição nº N` no detail - a chave do histórico da edição é esse nº (não viagem + posto);
 `EDITADO` com o portal ainda devolvendo o pedido = só reenvia o resultado. Erros seguem as regras do
 cadastro (`RegistrationError` direto ao portal, técnico após `MAX_TECHNICAL_ATTEMPTS`).

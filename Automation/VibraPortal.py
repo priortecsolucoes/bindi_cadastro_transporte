@@ -102,6 +102,20 @@ class RegistrationError(RuntimeError):
         self.user_message = user_message
 
 
+class PlateChangedError(RegistrationError):
+    """A programação na Vibra está com outra placa (o conjunto da viagem mudou). A
+    alteração da Vibra não troca a placa: o fluxo de edição exclui a programação e
+    cadastra outra, como na mudança de data/horário."""
+
+    def __init__(self, screen_plate: str, plates: List[str]):
+        super().__init__(
+            f"A programação na Vibra está com a placa {screen_plate}, mas a viagem agora usa "
+            f"{' / '.join(plates)}. A Vibra não permite trocar a placa ao alterar a programação."
+        )
+        self.screen_plate = screen_plate
+        self.plates = plates
+
+
 class ScheduleNotFoundError(RegistrationError):
     """Programação não encontrada na Consulta da Vibra (no intervalo pesquisado). Na
     edição é erro para o usuário; na exclusão quer dizer que ela já não está lá."""
@@ -670,6 +684,11 @@ MESSAGE_SELECTORS = "#mensagens, .alert, .ui-messages, .ui-growl-message"
 # Tela "Programação de Caminhão - Protocolo" depois do Finalizar:
 # h2 "Número da Programação : 4041588304 - 19/11/2026 18:15" (confirmado via DOM).
 SCHEDULE_NUMBER_PATTERN = re.compile(r"N[úu]mero da Programa[çc][ãa]o\s*:\s*(\d+)", re.IGNORECASE)
+# Placa (antiga ABC1234 ou Mercosul ABC1D23) em texto livre, ex.: linha da Consulta.
+PLATE_IN_TEXT_PATTERN = re.compile(r"\b([A-Z]{3}-?\d[A-Z0-9]\d{2})\b")
+# Na alteração não há Protocolo: a Vibra volta para a Consulta com o alerta
+# div.alert-info "Programação alterada com sucesso." (confirmado via DOM).
+EDIT_SUCCESS_PATTERN = re.compile(r"Programa[çc][ãa]o alterada com sucesso\.?", re.IGNORECASE)
 
 
 def schedule_and_finalize(
@@ -771,7 +790,11 @@ def _finalize_and_read_protocol(
     try:
         WebDriverWait(
             driver, SLOW_SCREEN_TIMEOUT, poll_frequency=1, ignored_exceptions=SLOW_SCREEN_IGNORED_ERRORS
-        ).until(lambda d: _schedule_number(d) or _visible_texts(d, ERROR_MESSAGE_SELECTORS))
+        ).until(
+            lambda d: _schedule_number(d)
+            or (edit and _edit_success_text(d))
+            or _visible_texts(d, ERROR_MESSAGE_SELECTORS)
+        )
     except TimeoutException:
         pass
     errors = _visible_texts(driver, ERROR_MESSAGE_SELECTORS)
@@ -779,6 +802,12 @@ def _finalize_and_read_protocol(
         raise RegistrationError(f"A Vibra recusou a programação ao Finalizar: {' | '.join(errors)}")
 
     schedule_number = _schedule_number(driver)
+    edit_success = _edit_success_text(driver) if edit else ""
+    if edit_success:
+        # Só o alerta de sucesso: a Consulta tem outros .alert que não são do resultado.
+        message = " | ".join(([adjustment_note] if adjustment_note else []) + [edit_success])
+        print(f"[OK] Alteração concluída na Vibra: {edit_success}")
+        return schedule_number, message, scheduled_time
     message = " | ".join(dict.fromkeys(
         ([adjustment_note] if adjustment_note else []) + _visible_texts(driver, MESSAGE_SELECTORS)
     ))
@@ -834,6 +863,14 @@ def _nearest_time(wanted_time: str, free_times: List[str]) -> str:
 def _schedule_number(driver: webdriver.Chrome) -> str:
     match = SCHEDULE_NUMBER_PATTERN.search(driver.find_element(By.TAG_NAME, "body").text)
     return match.group(1) if match else ""
+
+
+def _edit_success_text(driver: webdriver.Chrome) -> str:
+    for text in _visible_texts(driver, ".alert"):
+        match = EDIT_SUCCESS_PATTERN.search(text)
+        if match:
+            return match.group(0)
+    return ""
 
 
 def _visible_texts(driver: webdriver.Chrome, css_selector: str) -> List[str]:
@@ -1296,7 +1333,8 @@ def find_schedule(
                         )
                     day, month, year = match.group(1).split("/")
                     print(f"[INFO] Programação {schedule_number} encontrada na Consulta: agendada em {match.group(1)} {match.group(2)}.")
-                    return {"date": f"{year}-{month}-{day}", "time": match.group(2)}
+                    plates = list(dict.fromkeys(PLATE_IN_TEXT_PATTERN.findall(row.text.upper())))
+                    return {"date": f"{year}-{month}-{day}", "time": match.group(2), "plates": plates}
                 window_start = window_end + timedelta(days=1)
         except ClientNotFoundError as exc:
             print(f"[AVISO] {exc} - pesquisando nos demais postos da programação.")
@@ -1577,11 +1615,7 @@ def fill_edit_registration(driver: webdriver.Chrome, pool: str, plates: List[str
         raise RuntimeError(f"Placa da programação não encontrada na tela de Alterar Programação. {_page_summary(driver)}")
     screen_plate = match.group(1).upper().replace("-", "")
     if screen_plate not in plates:
-        raise RegistrationError(
-            f"A programação na Vibra está com a placa {screen_plate}, mas a viagem agora usa "
-            f"{' / '.join(plates)}. A Vibra não permite trocar a placa ao alterar a programação: exclua a "
-            "programação na Vibra e cadastre de novo (ou volte o caminhão da viagem)."
-        )
+        raise PlateChangedError(screen_plate, plates)
     print(f"[INFO] Placa da programação: {screen_plate} (fixa na alteração) | transportador mantido.")
     return {"pool": selected_pool, "carrier": "(mantido na alteração)", "plate": screen_plate}
 

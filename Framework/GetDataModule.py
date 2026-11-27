@@ -211,6 +211,8 @@ def _load_edit_items(config: BotConfig, history: Dict[tuple, dict]) -> List[dict
             "scheduleDeleted": edit_history.get("deleted_schedule", ""),
             # Horário aceito pela Vibra no cadastro; nulo = carregamento alterado depois.
             "distributorScheduledTime": trip.get("distributorScheduledTime"),
+            # Placa com que o agente cadastrou/editou a programação ("" = não está no histórico).
+            "registeredPlate": history.get(_plate_key(trip.get("distributorReference") or ""), {}).get("plate", ""),
         }
         if edit_history.get("finalized"):
             already_edited += 1
@@ -227,6 +229,10 @@ def _load_edit_items(config: BotConfig, history: Dict[tuple, dict]) -> List[dict
         print(f"[INFO] {already_edited} edição(ões) já EDITADA(S) na Vibra - {action}.")
     print(f"[OK] {len(items) - (already_edited if from_portal else 0)} programação(ões) a editar na Vibra.")
     return items
+
+
+def _plate_key(schedule_number) -> tuple:
+    return "PLATE", str(schedule_number).strip()
 
 
 def _edit_key(edit_request_id) -> tuple:
@@ -278,6 +284,10 @@ def _load_history(history_path: str) -> Dict[tuple, dict]:
                     number = SCHEDULE_NUMBER_IN_DETAIL.search(row.get("detail") or "")
                     if number:
                         entry["schedule_number"] = number.group(1)
+                        if status in (STATUS_FINALIZED, STATUS_EDITED) and row.get("plate"):
+                            # Placa com que a programação está na Vibra: a edição compara com a
+                            # da viagem antes de abrir a alteração (que não troca placa).
+                            history[_plate_key(number.group(1))] = {"plate": _normalize_plate(row["plate"])}
                     scheduled = SCHEDULED_TIME_IN_DETAIL.search(row.get("detail") or "")
                     if scheduled:
                         entry["scheduled_time"] = scheduled.group(1)

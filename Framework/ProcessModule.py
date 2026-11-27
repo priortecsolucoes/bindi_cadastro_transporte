@@ -24,6 +24,7 @@ from typing import List
 from selenium.common.exceptions import WebDriverException
 
 from Automation.VibraPortal import (
+    PlateChangedError,
     RegistrationError,
     ScheduleNotFoundError,
     compartments_already_match,
@@ -58,7 +59,7 @@ from Log.LogModule import (
     LogModule,
 )
 from Utils.DriverFactory import create_driver, load_cookies, save_cookies
-from Utils.PortalClient import report_deletion, report_edit, report_registration
+from Utils.PortalClient import report_deletion, report_edit, report_processing, report_registration
 
 DEFAULT_COOKIES_PATH = "vibra_cookies.json"
 MAX_TECHNICAL_ATTEMPTS = 3
@@ -158,6 +159,7 @@ def process_items(items: List[dict], config: BotConfig, log_module: LogModule) -
                     f"[INFO]   Pedido {order['orderNumber']} | Vibra {order['distributorOrderNumber']} | "
                     f"{order.get('vibraPool', item['pool'])} | {products}"
                 )
+            _set_processing(config, item, True)
             try:
                 if item.get("isDeletion"):
                     step_result = _delete_trip_schedule(driver, main_handle, config, item)
@@ -172,6 +174,7 @@ def process_items(items: List[dict], config: BotConfig, log_module: LogModule) -
                 screenshot_name = f"erro_{kind}_{index}.png"
                 screenshot_path = _save_screenshot(driver, screenshot_name)
                 _handle_error(config, item, exc, screenshot_path, log_module)
+                _set_processing(config, item, False)
                 continue
 
             print(f"[OK] Programação da placa {item['plate']}: {status}.")
@@ -187,6 +190,7 @@ def process_items(items: List[dict], config: BotConfig, log_module: LogModule) -
                 except Exception as exc:  # noqa: BLE001 - já está na Vibra; o próximo ciclo reenvia
                     print(f"[ERRO] Placa {item['plate']} {status.lower()} na Vibra, mas o retorno ao portal falhou: {exc}")
                     detail = f"{detail} | Retorno ao portal falhou (reenviado no próximo ciclo): {exc}"
+            _set_processing(config, item, False)
             _write_result(log_module, item, status, selected, detail)
     finally:
         # Só com login confirmado: cookies de uma tentativa falha sobrescreveriam uma sessão boa.
@@ -246,19 +250,22 @@ def _edit_trip(driver, main_handle: str, config: BotConfig, item: dict, log_modu
 
     change = _schedule_change(item, current)
     if change:
-        print(f"[INFO] {change} - a alteração da Vibra não muda isso: excluindo a programação {old_number} e cadastrando outra.")
-        delete_schedule(driver, old_number)
-        _write_result(
-            log_module, item, STATUS_SCHEDULE_DELETED,
-            detail=f"{SCHEDULE_DELETED_LABEL} {old_number} | {change}",
-        )
-        return _recreate_schedule(driver, main_handle, config, item, old_number)
+        return _delete_and_recreate(driver, main_handle, config, item, log_module, change)
 
     print("[INFO] Data e horário mantidos - alterando só os compartimentos.")
     open_schedule_for_edit(driver, old_number)
     first_pool = item["pools"][0]["pool"]
     # Placa e transportador ficam fixos na alteração: só confere a placa e seleciona o Pool.
-    filled = fill_edit_registration(driver, first_pool, item.get("plates") or [item["plate"]], item["carrier"])
+    try:
+        filled = fill_edit_registration(driver, first_pool, item.get("plates") or [item["plate"]], item["carrier"])
+    except PlateChangedError as exc:
+        # A placa só aparece na tela de alteração: volta à Consulta para excluir.
+        go_home(driver, main_handle)
+        select_company(driver, config.company)
+        open_fob_query(driver)
+        find_schedule(driver, old_number, date_from, date_to, config.vibra_base, _query_clients(item))
+        change = f"Mudou a placa {exc.screen_plate} -> {' / '.join(exc.plates)}"
+        return _delete_and_recreate(driver, main_handle, config, item, log_module, change)
     item["plate"] = filled["plate"]
     selected = {"pools": {first_pool: filled["pool"]}, "carrier": filled["carrier"]}
 
@@ -358,10 +365,44 @@ def _schedule_change(item: dict, current: dict) -> str:
         changes.append(f"data {current['date']} -> {item['loadDate']}")
     if not item.get("distributorScheduledTime") and current["time"] != item["loadTime"]:
         changes.append(f"horário {current['time']} -> {item['loadTime']}")
+    old_plate = _registered_plate(item, current)
+    if old_plate:
+        changes.append(f"placa {old_plate} -> {' / '.join(item.get('plates') or [item['plate']])}")
     return ("Mudou " + " e ".join(changes)) if changes else ""
 
 
-def _recreate_schedule(driver, main_handle: str, config: BotConfig, item: dict, old_number: str) -> tuple:
+def _registered_plate(item: dict, current: dict) -> str:
+    """Placa antiga da programação se ela for diferente da viagem ("" = mesma ou
+    desconhecida). Fontes: placas na linha da Consulta (se a Vibra mostrar) e a placa
+    gravada no histórico quando o agente cadastrou/editou. Desconhecida: a tela de
+    alteração confere de novo (PlateChangedError)."""
+    trip_plates = {p.replace("-", "") for p in (item.get("plates") or [item["plate"]])}
+    if item.get("tractorPlate"):
+        trip_plates.add(item["tractorPlate"].upper().replace("-", ""))
+    row_plates = [p.replace("-", "") for p in current.get("plates") or []]
+    if row_plates:
+        return "" if trip_plates & set(row_plates) else row_plates[0]
+    registered = item.get("registeredPlate") or ""
+    return registered if registered and registered not in trip_plates else ""
+
+
+def _delete_and_recreate(driver, main_handle: str, config: BotConfig, item: dict, log_module: LogModule, change: str) -> tuple:
+    """A alteração da Vibra não muda data, horário nem placa: exclui a programação
+    (a linha já está na Consulta, via find_schedule), marca EXCLUIDO no histórico -
+    a próxima tentativa só cadastra - e cadastra a nova."""
+    old_number = item["scheduleNumber"]
+    print(f"[INFO] {change} - a alteração da Vibra não muda isso: excluindo a programação {old_number} e cadastrando outra.")
+    delete_schedule(driver, old_number)
+    _write_result(
+        log_module, item, STATUS_SCHEDULE_DELETED,
+        detail=f"{SCHEDULE_DELETED_LABEL} {old_number} | {change}",
+    )
+    return _recreate_schedule(driver, main_handle, config, item, old_number, change)
+
+
+def _recreate_schedule(
+    driver, main_handle: str, config: BotConfig, item: dict, old_number: str, change: str = ""
+) -> tuple:
     """Cadastra a programação nova depois de excluir a antiga. Erro aqui deixa a
     viagem sem programação na Vibra - a mensagem diz isso ao usuário."""
     try:
@@ -370,7 +411,7 @@ def _recreate_schedule(driver, main_handle: str, config: BotConfig, item: dict, 
         )
     except RegistrationError as exc:
         raise RegistrationError(
-            f"A programação {old_number} foi excluída na Vibra para mudar a data/horário, mas o cadastro da nova "
+            f"A programação {old_number} foi excluída na Vibra ({_change_label(change)}), mas o cadastro da nova "
             f"falhou: {exc.user_message}",
             str(exc),
         ) from exc
@@ -380,10 +421,27 @@ def _recreate_schedule(driver, main_handle: str, config: BotConfig, item: dict, 
             f"cadastra): {short_error(exc)}"
         ) from exc
     detail = (
-        f"{EDIT_REQUEST_LABEL} {item['editRequestId']} | Programação {old_number} excluída (data/horário mudou) "
+        f"{EDIT_REQUEST_LABEL} {item['editRequestId']} | Programação {old_number} excluída ({_change_label(change)}) "
         f"e recriada | {detail}"
     )
     return company, selected, STATUS_EDITED, detail, schedule_number, vibra_message, scheduled_time
+
+
+def _change_label(change: str) -> str:
+    return change[0].lower() + change[1:] if change else "data/horário/placa mudou numa tentativa anterior"
+
+
+def _set_processing(config: BotConfig, item: dict, processing: bool) -> None:
+    """Selo PROCESSANDO da viagem no quadro do portal (cadastro e edição; a exclusão
+    não tem viagem). Falha só avisa: o selo não pode impedir o cadastro."""
+    if item.get("isDeletion") or not item.get("reportToPortal") or not item.get("tripId"):
+        return
+    action = "edit" if item.get("isEdit") else "register"
+    try:
+        report_processing(config.portal_api_url, config.portal_api_token, item["tripId"], processing, action)
+    except Exception as exc:  # noqa: BLE001 - só o selo do quadro
+        state = "processando" if processing else "fim do processamento"
+        print(f"[AVISO] Não foi possível marcar a viagem {item['tripId']} como {state} no portal: {short_error(exc)}")
 
 
 def _edit_search_window(load_date: str, search_days: int):

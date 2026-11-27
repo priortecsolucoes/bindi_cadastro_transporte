@@ -207,3 +207,20 @@ def report_deletion(
             f"(HTTP {response.status_code}): {response.text[:300]}"
         )
     return response.json()
+
+
+def report_processing(base_url: str, token: str, trip_id: int, processing: bool, action: str) -> None:
+    """POST /api/rpa/vibra/processando - liga (processing=True, ao começar a viagem) ou
+    desliga o selo PROCESSANDO da viagem no quadro. action = 'register' ou 'edit'.
+    Levanta RuntimeError; quem chama só avisa (o selo não pode parar o cadastro)."""
+    url = f"{base_url.rstrip('/')}/api/rpa/vibra/processando"
+    payload = {"tripId": trip_id, "processing": processing, "action": action}
+    try:
+        response = requests.post(url, headers=_headers(token), json=payload, timeout=REQUEST_TIMEOUT_SECONDS)
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Falha ao conectar no Portal Bindi Log ({url}): {exc}") from exc
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"Portal Bindi Log recusou o status de processamento da viagem {trip_id} "
+            f"(HTTP {response.status_code}): {response.text[:300]}"
+        )
