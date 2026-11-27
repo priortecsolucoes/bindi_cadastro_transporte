@@ -38,8 +38,10 @@ from Automation.VibraPortal import (
     open_fob_query,
     open_fob_registration,
     open_schedule_for_edit,
+    report_step,
     schedule_and_finalize,
     select_company,
+    set_step_reporter,
     unload_mismatched_compartments,
 )
 from Framework.InitModule import BotConfig
@@ -63,6 +65,8 @@ from Utils.PortalClient import report_deletion, report_edit, report_processing, 
 
 DEFAULT_COOKIES_PATH = "vibra_cookies.json"
 MAX_TECHNICAL_ATTEMPTS = 3
+# Etapa do selo PROCESSANDO: curta, porque é chamada várias vezes por viagem.
+STEP_REQUEST_TIMEOUT_SECONDS = 10
 TECHNICAL_ERROR_MESSAGE = (
     "Falha técnica do agente ao cadastrar a Programação FOB na Vibra ({attempts} tentativas seguidas). "
     "Cadastre manualmente se for urgente e acione o suporte da automação (veja 'Detalhes técnicos'). "
@@ -113,6 +117,10 @@ def process_items(items: List[dict], config: BotConfig, log_module: LogModule) -
 
     cookies_path = os.environ.get("VIBRA_COOKIES_PATH", "").strip() or DEFAULT_COOKIES_PATH
     logged_in = False
+    # O login vale para a sessão inteira; no quadro ele aparece como etapa da 1ª viagem.
+    first_trip = items[0] if _shows_processing(items[0]) else None
+    if first_trip:
+        _set_processing(config, first_trip, True)
     try:
         load_cookies(driver, cookies_path)
         try:
@@ -126,8 +134,12 @@ def process_items(items: List[dict], config: BotConfig, log_module: LogModule) -
                 token_timeout_seconds=config.token_timeout_seconds,
             )
         except RPAFrameworkException:
+            if first_trip:
+                _set_processing(config, first_trip, False)
             raise
         except Exception as exc:  # noqa: BLE001 - sem login nenhuma programação roda; tenta no próximo ciclo
+            if first_trip:
+                _set_processing(config, first_trip, False)
             screenshot_path = _save_screenshot(driver, "erro_login.png")
             raise RPAFrameworkException(
                 f"Login na Vibra falhou: {short_error(exc)} (screenshot: {screenshot_path}). "
@@ -159,7 +171,8 @@ def process_items(items: List[dict], config: BotConfig, log_module: LogModule) -
                     f"[INFO]   Pedido {order['orderNumber']} | Vibra {order['distributorOrderNumber']} | "
                     f"{order.get('vibraPool', item['pool'])} | {products}"
                 )
-            _set_processing(config, item, True)
+            if item is not first_trip:
+                _set_processing(config, item, True)
             try:
                 if item.get("isDeletion"):
                     step_result = _delete_trip_schedule(driver, main_handle, config, item)
@@ -193,6 +206,7 @@ def process_items(items: List[dict], config: BotConfig, log_module: LogModule) -
             _set_processing(config, item, False)
             _write_result(log_module, item, status, selected, detail)
     finally:
+        set_step_reporter(None)
         # Só com login confirmado: cookies de uma tentativa falha sobrescreveriam uma sessão boa.
         if logged_in:
             save_cookies(driver, cookies_path)
@@ -253,6 +267,7 @@ def _edit_trip(driver, main_handle: str, config: BotConfig, item: dict, log_modu
         return _delete_and_recreate(driver, main_handle, config, item, log_module, change)
 
     print("[INFO] Data e horário mantidos - alterando só os compartimentos.")
+    report_step("Data, horário e placa mantidos - editando só os compartimentos")
     open_schedule_for_edit(driver, old_number)
     first_pool = item["pools"][0]["pool"]
     # Placa e transportador ficam fixos na alteração: só confere a placa e seleciona o Pool.
@@ -392,6 +407,7 @@ def _delete_and_recreate(driver, main_handle: str, config: BotConfig, item: dict
     a próxima tentativa só cadastra - e cadastra a nova."""
     old_number = item["scheduleNumber"]
     print(f"[INFO] {change} - a alteração da Vibra não muda isso: excluindo a programação {old_number} e cadastrando outra.")
+    report_step(f"{change}: excluindo a programação {old_number} para cadastrar outra")
     delete_schedule(driver, old_number)
     _write_result(
         log_module, item, STATUS_SCHEDULE_DELETED,
@@ -405,6 +421,7 @@ def _recreate_schedule(
 ) -> tuple:
     """Cadastra a programação nova depois de excluir a antiga. Erro aqui deixa a
     viagem sem programação na Vibra - a mensagem diz isso ao usuário."""
+    report_step(f"Programação {old_number} excluída - cadastrando a nova")
     try:
         company, selected, _, detail, schedule_number, vibra_message, scheduled_time = _register_trip(
             driver, main_handle, config, item
@@ -431,17 +448,50 @@ def _change_label(change: str) -> str:
     return change[0].lower() + change[1:] if change else "data/horário/placa mudou numa tentativa anterior"
 
 
+def _shows_processing(item: dict) -> bool:
+    # A exclusão não tem viagem (já foi apagada no portal); mock/CSV não falam com o portal.
+    return not item.get("isDeletion") and bool(item.get("reportToPortal")) and bool(item.get("tripId"))
+
+
 def _set_processing(config: BotConfig, item: dict, processing: bool) -> None:
-    """Selo PROCESSANDO da viagem no quadro do portal (cadastro e edição; a exclusão
-    não tem viagem). Falha só avisa: o selo não pode impedir o cadastro."""
-    if item.get("isDeletion") or not item.get("reportToPortal") or not item.get("tripId"):
+    """Selo PROCESSANDO da viagem no quadro do portal e, enquanto ligado, a etapa atual
+    (report_step do VibraPortal). Falha só avisa: o selo não pode impedir o cadastro."""
+    set_step_reporter(None)
+    if not _shows_processing(item):
         return
     action = "edit" if item.get("isEdit") else "register"
+    first_step = "Iniciando a alteração da programação" if item.get("isEdit") else "Iniciando o cadastro da programação"
     try:
-        report_processing(config.portal_api_url, config.portal_api_token, item["tripId"], processing, action)
+        report_processing(
+            config.portal_api_url, config.portal_api_token, item["tripId"], processing, action,
+            step=first_step if processing else None, start=processing,
+        )
     except Exception as exc:  # noqa: BLE001 - só o selo do quadro
         state = "processando" if processing else "fim do processamento"
         print(f"[AVISO] Não foi possível marcar a viagem {item['tripId']} como {state} no portal: {short_error(exc)}")
+        return
+    if processing:
+        set_step_reporter(_step_sender(config, item, action))
+
+
+def _step_sender(config: BotConfig, item: dict, action: str):
+    """Envia cada etapa ao portal. Depois de uma falha para de enviar nesta viagem:
+    portal fora do ar não pode somar um timeout a cada etapa."""
+    state = {"enabled": True}
+
+    def send(text: str) -> None:
+        if not state["enabled"]:
+            return
+        try:
+            report_processing(
+                config.portal_api_url, config.portal_api_token, item["tripId"], True, action,
+                step=text, timeout=STEP_REQUEST_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            state["enabled"] = False
+            raise
+
+    return send
 
 
 def _edit_search_window(load_date: str, search_days: int):

@@ -91,6 +91,25 @@ COMPANY_TRIGGER_WAIT_SECONDS = 10
 SHIPMENT_LIST_WAIT_SECONDS = 10
 
 
+# Etapa atual mostrada no quadro de viagens do portal (selo PROCESSANDO). O ProcessModule
+# liga o reporter para a viagem em andamento; sem reporter, report_step não faz nada.
+_step_reporter = None
+
+
+def set_step_reporter(callback) -> None:
+    global _step_reporter
+    _step_reporter = callback
+
+
+def report_step(text: str) -> None:
+    if _step_reporter is None:
+        return
+    try:
+        _step_reporter(text)
+    except Exception as exc:  # noqa: BLE001 - a etapa é só informativa, não pode parar o cadastro
+        print(f"[AVISO] Falha ao enviar a etapa '{text}' ao portal: {exc}")
+
+
 class RegistrationError(RuntimeError):
     """Erro de dados da programação que o usuário corrige no Portal Bindi Log
     (horário indisponível, placa ou compartimento recusado...): user_message
@@ -140,6 +159,7 @@ def login(
     API, ou se o código não chegar, aguarda até mfa_wait_seconds para o usuário
     digitá-lo na janela do Chrome ou gravá-lo em MFA_CODE_FILE."""
     print("[INFO] Acessando o Canal de Negócios Vibra...")
+    report_step("Acessando o Canal de Negócios Vibra")
     driver.get(HOME_URL)
 
     try:
@@ -153,11 +173,13 @@ def login(
 
     if driver.find_elements(By.CSS_SELECTOR, MENU_SELECTOR):
         print("[OK] Sessão do SSO reaproveitada - login não foi necessário.")
+        report_step("Login feito (sessão reaproveitada)")
         return
 
     # O ticket precisa ser emitido antes de enviar a senha, senão o e-mail do
     # código pode chegar antes e ser descartado como antigo.
     ticket = prepare_token(token_api_url, token_api_token) if token_api_url else None
+    report_step("Fazendo login na Vibra")
 
     username_field = driver.find_element(By.ID, "username")
     username_field.clear()
@@ -182,10 +204,12 @@ def login(
             driver, token_api_url, token_api_token, ticket, token_timeout_seconds, timeout
         ):
             print("[OK] Login realizado com sucesso (código de 2FA lido do e-mail).")
+            report_step("Login feito")
             return
         _wait_manual_mfa_code(driver, mfa_wait_seconds)
 
     print("[OK] Login realizado com sucesso.")
+    report_step("Login feito")
 
 
 def _submit_mfa_code_from_api(
@@ -199,6 +223,7 @@ def _submit_mfa_code_from_api(
     """Busca o código na Vibra Token API e o envia. Devolve False (para cair no
     modo manual) se o código não chegar ou não for aceito."""
     print(f"[INFO] Autenticação em 2 fatores: aguardando o código na Vibra Token API (até {token_timeout_seconds}s)...")
+    report_step("Aguardando o código de verificação (2FA) do e-mail")
     try:
         code = fetch_token(token_api_url, token_api_token, ticket, token_timeout_seconds)
     except RuntimeError as exc:
@@ -287,6 +312,7 @@ def go_home(driver: webdriver.Chrome, main_handle: str) -> None:
             driver.switch_to.window(handle)
             driver.close()
     driver.switch_to.window(main_handle)
+    report_step("Abrindo a página inicial da Vibra")
     driver.get(HOME_URL)
     try:
         WebDriverWait(driver, DEFAULT_TIMEOUT).until(EC.presence_of_element_located((By.CSS_SELECTOR, MENU_SELECTOR)))
@@ -316,6 +342,7 @@ def select_company(driver: webdriver.Chrome, company_name: str) -> str:
     O diálogo de troca pode mostrar só o nome, sem o código ("10076 - "), então
     compara também sem ele. Devolve a unidade ativa."""
     names = list(dict.fromkeys([company_name.strip(), company_name.split(" - ", 1)[-1].strip()]))
+    report_step(f"Selecionando a unidade {names[-1]}")
     current = read_current_company(driver)
     if _matching_company([current], names):
         print(f"[INFO] Unidade ativa na Vibra: {current}")
@@ -417,6 +444,7 @@ def open_fob_registration(driver: webdriver.Chrome) -> None:
     _navigate_fob_menu(driver, "Cadastrar")
 
     print("[INFO] Pesquisa de Remessas > Pesquisar")
+    report_step("Aguardando a tela Pesquisa de Remessas")
     try:
         WebDriverWait(driver, SLOW_SCREEN_TIMEOUT, ignored_exceptions=SLOW_SCREEN_IGNORED_ERRORS).until(
             EC.presence_of_element_located((By.ID, "forumlarioPesquisa:comboBase"))
@@ -432,6 +460,7 @@ def open_fob_registration(driver: webdriver.Chrome) -> None:
 def _navigate_fob_menu(driver: webdriver.Chrome, leaf_title: str) -> None:
     """Menu lateral > Programação > Programação FOB > leaf_title ('Cadastrar' ou 'Consultar')."""
     print(f"[INFO] Menu > Programação > Programação FOB > {leaf_title}")
+    report_step(f"Abrindo Programação FOB > {leaf_title}")
     # O menu recolhe sozinho se o hover "escapar" (animação, re-render do Angular):
     # cada passo confere o menu e a navegação inteira é refeita se ele fechar no meio.
     for attempt in range(1, MENU_NAV_ATTEMPTS + 1):
@@ -477,6 +506,7 @@ def _search_shipments_and_wait_compartments(driver: webdriver.Chrome) -> None:
         print("[INFO] 'Pesquisar' clicado; a Vibra ainda está carregando a próxima tela.")
 
     print("[INFO] Aguardando a tela de Compartimentação (pode demorar)...")
+    report_step("Pesquisando remessas - aguardando a tela de Compartimentação (pode demorar)")
     try:
         WebDriverWait(
             driver, SLOW_SCREEN_TIMEOUT, poll_frequency=1, ignored_exceptions=SLOW_SCREEN_IGNORED_ERRORS
@@ -504,6 +534,7 @@ def fill_registration(driver: webdriver.Chrome, pool: str, plates: List[str], ca
             accepted_plate = plate
             break
         refusals.append(f"{plate} (Vibra: {' | '.join(plate_errors)})")
+        report_step(f"Vibra recusou a placa {plate} - tentando a próxima")
         print(f"[AVISO] A Vibra recusou a placa {plate}: {' | '.join(plate_errors)}")
     if not accepted_plate:
         raise RegistrationError(
@@ -513,6 +544,7 @@ def fill_registration(driver: webdriver.Chrome, pool: str, plates: List[str], ca
         )
 
     print(f"[INFO] Transportador: {carrier}")
+    report_step(f"Selecionando o transportador {carrier}")
     selected_carrier = _select_select2(driver, "cmbTranspp", carrier)
     _wait_page_ready(driver)
 
@@ -522,6 +554,7 @@ def fill_registration(driver: webdriver.Chrome, pool: str, plates: List[str], ca
 def _search_plate(driver: webdriver.Chrome, plate: str) -> List[str]:
     """Placa + Buscar. Devolve os alertas de erro da Vibra (vazio = placa aceita)."""
     print(f"[INFO] Placa: {plate}")
+    report_step(f"Buscando a placa {plate}")
     _fill_plate(driver, plate)
     # Alerta antigo na tela (inclusive da placa anterior) seria lido como resposta desta.
     _remove_error_messages(driver)
@@ -619,6 +652,7 @@ def load_compartments(
             continue
         _check_vehicle_row_free(vehicle_row, compartment_number, capacity_m3)
 
+        report_step(f"Carregando o compartimento C{compartment_number}: {product_name} (ordem {order_number})")
         shipment_row, shipment_product = _find_shipment_row(driver, order_number, product_name)
         _load_shipment_into_compartment(driver, shipment_row, compartment_number)
 
@@ -633,6 +667,7 @@ def load_compartments(
         loaded.append((compartment_number, order_number))
 
     print("[INFO] Carregamento do Veículo > Continuar")
+    report_step("Compartimentos carregados - indo para o Agendamento")
     try:
         continue_button = WebDriverWait(driver, DEFAULT_TIMEOUT).until(
             lambda d: _first_visible(d, CONTINUE_BUTTON_XPATH)
@@ -646,6 +681,7 @@ def load_compartments(
 
 def _select_pool(driver: webdriver.Chrome, pool: str) -> str:
     print(f"[INFO] Pool: {pool}")
+    report_step(f"Selecionando o posto {pool} no Pool")
     selected = _select_select2(driver, "comboPool", pool, not_found_message=POOL_NOT_FOUND_MESSAGE.format(pool=pool))
     _wait_page_ready(driver)
     return selected
@@ -707,6 +743,7 @@ def schedule_and_finalize(
     year, month, day = load_date.split("-")
     wanted_text = f"{day}/{month}/{year} - {load_time}"
     print(f"[INFO] Agendamento: data e hora do carregamento {wanted_text}")
+    report_step(f"Agendamento: escolhendo data e horário {wanted_text}")
 
     try:
         WebDriverWait(driver, SLOW_SCREEN_TIMEOUT, ignored_exceptions=SLOW_SCREEN_IGNORED_ERRORS).until(
@@ -779,6 +816,7 @@ def _finalize_and_read_protocol(
     if not (edit and _schedule_number(driver)):
         finalize_button = _finalize_button(driver, edit)
         print(f"[INFO] Agendamento > {(finalize_button.text or finalize_button.get_attribute('value') or 'Finalizar').strip()}")
+        report_step("Finalizando - aguardando a confirmação da Vibra")
         try:
             finalize_button.click()
         except ReadTimeoutError:
@@ -1323,6 +1361,10 @@ def find_schedule(
         try:
             while window_start <= date_to:
                 window_end = min(window_start + timedelta(days=MAX_QUERY_RANGE_DAYS - 1), date_to)
+                report_step(
+                    f"Procurando a programação {schedule_number} na Consulta ({client_label}, "
+                    f"{window_start:%d/%m} a {window_end:%d/%m})"
+                )
                 search_schedules(driver, window_start, window_end, base, client)
                 row = _find_schedule_row(driver, schedule_number)
                 if row is not None:
@@ -1492,6 +1534,7 @@ def open_schedule_for_edit(driver: webdriver.Chrome, schedule_number: str) -> No
             f"A Vibra não permite alterar a programação {schedule_number} (sem o botão 'Alterar Programação' "
             "na Consulta - pode já estar em carregamento ou cancelada). Altere manualmente na Vibra."
         )
+    report_step(f"Abrindo a alteração da programação {schedule_number}")
     _scroll_and_click(driver, pencils[0])
     _wait_ajax_idle(driver)
 
@@ -1518,6 +1561,7 @@ def open_schedule_for_edit(driver: webdriver.Chrome, schedule_number: str) -> No
         _install_ajax_monitor(driver)
         return
     print("[INFO] Pesquisa de Remessas > Pesquisar")
+    report_step("Aguardando a tela Pesquisa de Remessas da alteração")
     _wait_page_ready(driver)
     _search_shipments_and_wait_compartments(driver)
 
@@ -1534,6 +1578,7 @@ def delete_schedule(driver: webdriver.Chrome, schedule_number: str) -> None:
             "estar em carregamento). Para mudar a data/horário, ajuste manualmente na Vibra."
         )
     print(f"[INFO] Consulta > Excluir Programação {schedule_number}")
+    report_step(f"Excluindo a programação {schedule_number} na Vibra")
     _scroll_and_click(driver, trash_links[0])
     _wait_ajax_idle(driver)
     try:
@@ -1610,6 +1655,7 @@ def fill_edit_registration(driver: webdriver.Chrome, pool: str, plates: List[str
         return fill_registration(driver, pool, plates, carrier)
 
     selected_pool = _select_pool(driver, pool)
+    report_step("Editando a programação: conferindo a placa")
     match = EDIT_PLATE_PATTERN.search(driver.find_element(By.TAG_NAME, "body").text)
     if not match:
         raise RuntimeError(f"Placa da programação não encontrada na tela de Alterar Programação. {_page_summary(driver)}")
@@ -1647,6 +1693,7 @@ def unload_mismatched_compartments(driver: webdriver.Chrome, orders: List[dict])
             f"a viagem agora põe a ordem {wanted[0]} ({wanted[1]}) nele" if wanted else "a viagem não usa mais esse compartimento"
         )
         print(f"[INFO] Compartimento {number}: carregado com a ordem {current_order}, mas {reason} - esvaziando.")
+        report_step(f"Editando a programação: esvaziando o compartimento C{number}")
         unload_links = row.find_elements(By.XPATH, UNLOAD_COMPARTMENT_XPATH)
         if not unload_links:
             raise RegistrationError(

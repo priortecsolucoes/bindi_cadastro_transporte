@@ -107,6 +107,11 @@ um pedido dividido em várias viagens é cadastrado viagem a viagem.
   No quadro de viagens aparece o selo PROCESSANDO no lugar de EDIÇÃO/ERRO; marca com mais de 30 min
   é ignorada (agente caiu no meio). O quadro recarrega sozinho a cada 30 s se houver viagem liberada.
   Falha nessa chamada só gera `[AVISO]`.
+  **Etapas**: enquanto processa, cada passo vai na mesma rota com `step` (migração 041 do portal: `step`,
+  `step_at`; `start: true` só no início da viagem) e aparece numa faixa acima dos compartimentos
+  ("Agente RPA · Vibra: Carregando o compartimento C3..."). No VibraPortal é `report_step(texto)`
+  (no-op sem reporter); o ProcessModule liga o reporter por viagem (`set_step_reporter`). O login é mostrado
+  como etapa da 1ª viagem. Falha ao enviar uma etapa desliga o envio até a próxima viagem (timeout 10 s).
 ### Fila de edição (viagem já programada e alterada no portal)
 Origem: o protótipo `vibra_edicao.py` (standalone, lia do Postgres), integrado ao pipeline.
 No portal, reabrir + alterar + **liberar de novo** uma viagem que já tem nota de cadastro

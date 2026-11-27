@@ -209,14 +209,27 @@ def report_deletion(
     return response.json()
 
 
-def report_processing(base_url: str, token: str, trip_id: int, processing: bool, action: str) -> None:
-    """POST /api/rpa/vibra/processando - liga (processing=True, ao começar a viagem) ou
-    desliga o selo PROCESSANDO da viagem no quadro. action = 'register' ou 'edit'.
+def report_processing(
+    base_url: str,
+    token: str,
+    trip_id: int,
+    processing: bool,
+    action: str,
+    step: Optional[str] = None,
+    start: bool = False,
+    timeout: int = REQUEST_TIMEOUT_SECONDS,
+) -> None:
+    """POST /api/rpa/vibra/processando - liga (processing=True) ou desliga o selo
+    PROCESSANDO da viagem no quadro. action = 'register' ou 'edit'; step = etapa atual
+    ("Aguardando a tela de Compartimentação"...), mostrada embaixo do selo; start=True
+    marca o início da viagem (zera o tempo decorrido).
     Levanta RuntimeError; quem chama só avisa (o selo não pode parar o cadastro)."""
     url = f"{base_url.rstrip('/')}/api/rpa/vibra/processando"
-    payload = {"tripId": trip_id, "processing": processing, "action": action}
+    payload = {"tripId": trip_id, "processing": processing, "action": action, "start": start}
+    if step:
+        payload["step"] = step[:200]
     try:
-        response = requests.post(url, headers=_headers(token), json=payload, timeout=REQUEST_TIMEOUT_SECONDS)
+        response = requests.post(url, headers=_headers(token), json=payload, timeout=timeout)
     except requests.RequestException as exc:
         raise RuntimeError(f"Falha ao conectar no Portal Bindi Log ({url}): {exc}") from exc
     if response.status_code != 200:
