@@ -1288,9 +1288,18 @@ QUERY_EMPTY_TEXT = "Nenhuma programação foi encontrada"
 QUERY_SCHEDULE_PATTERN = re.compile(r"(\d{2}/\d{2}/\d{4})\s+(\d{2}:\d{2})")
 # Lixeira da linha (confirmado via DOM): span#...:roleExcluirProgramacao > <a onclick=
 # "mojarra.ab(...'formConProg:confirmDialog'...openDialogModal)"> > button[title='Excluir Programação'].
+# Também pelo onclick do <a> (abre o confirmDialog), pelo próprio <a> com o id, pelo
+# data-original-title (o tooltip do Bootstrap tira o title) e pelo ícone fa-trash.
 DELETE_SCHEDULE_XPATH = (
-    ".//*[contains(@id,'ExcluirProgramacao')]//a"
-    " | .//button[contains(@title,'Excluir Programa')]/ancestor::a[1]"
+    ".//a[contains(@onclick,'confirmDialog')]"
+    " | .//*[contains(@id,'ExcluirProgramacao')]/descendant-or-self::a"
+    " | .//*[contains(@title,'Excluir Programa') or contains(@data-original-title,'Excluir Programa')"
+    " or contains(@class,'fa-trash')]/ancestor::a[1]"
+)
+# Sem <a> em volta: o próprio botão vermelho da linha.
+DELETE_SCHEDULE_BUTTON_XPATH = (
+    ".//button[contains(@title,'Excluir Programa') or contains(@data-original-title,'Excluir Programa')"
+    " or .//*[contains(@class,'fa-trash')]]"
 )
 # Modal "Exclusão de Programação" (div#formConProg:confirmDialog): "Confirma a exclusão da
 # programação N ?" > a#formConProg:btnExcluir 'Excluir' (onclick mojarra, render pnlProgramacoes).
@@ -1622,11 +1631,23 @@ def delete_schedule(driver: webdriver.Chrome, schedule_number: str) -> None:
     'Exclusão de Programação' > 'Excluir', e confere que a linha sumiu. Usado
     quando a data/horário mudou (a alteração da Vibra não muda isso)."""
     row = _find_schedule_row(driver, schedule_number)
-    trash_links = row.find_elements(By.XPATH, DELETE_SCHEDULE_XPATH) if row is not None else []
+    if row is None:
+        raise RuntimeError(
+            f"Programação {schedule_number} sumiu da Consulta antes da exclusão. {_page_summary(driver)}"
+        )
+    trash_links = (
+        row.find_elements(By.XPATH, DELETE_SCHEDULE_XPATH)
+        or _row_elements_outside_tr(driver, row, "ExcluirProgramacao")
+        or row.find_elements(By.XPATH, DELETE_SCHEDULE_BUTTON_XPATH)
+    )
     if not trash_links:
+        # O detalhe técnico é cortado no log do ProcessModule: o HTML da linha vai inteiro aqui.
+        row_html = " ".join((row.get_attribute("outerHTML") or "").split())
+        print(f"[ERRO] Linha da programação {schedule_number} sem lixeira. HTML: {row_html}")
         raise RegistrationError(
             f"A Vibra não permite excluir a programação {schedule_number} (sem a lixeira na Consulta - pode já "
-            "estar em carregamento). Para mudar a data/horário, ajuste manualmente na Vibra."
+            "estar em carregamento). Exclua ou ajuste a programação manualmente na Vibra.",
+            f"linha da Consulta: '{' '.join(row.text.split())}'",
         )
     print(f"[INFO] Consulta > Excluir Programação {schedule_number}")
     report_step(f"Excluindo a programação {schedule_number} na Vibra")
@@ -1658,6 +1679,21 @@ def delete_schedule(driver: webdriver.Chrome, schedule_number: str) -> None:
     if errors:
         raise RegistrationError(f"A Vibra recusou a exclusão da programação {schedule_number}: {' | '.join(errors)}")
     print(f"[OK] Programação {schedule_number} excluída na Vibra.")
+
+
+def _row_elements_outside_tr(driver: webdriver.Chrome, row, id_part: str) -> list:
+    """Links da mesma linha que não estão dentro do <tr> achado (tabela mestre-detalhe):
+    os ids do JSF levam o prefixo da linha, "formConProg:tblProgramacoesMD:0:"."""
+    row_id = row.get_attribute("id") or ""
+    if not row_id.endswith(":row"):
+        return []
+    prefix = row_id[: -len("row")]
+    links = driver.find_elements(
+        By.XPATH,
+        f"//*[starts-with(@id,{_xpath_literal(prefix)}) and contains(@id,{_xpath_literal(id_part)})]"
+        "/descendant-or-self::a",
+    )
+    return [link for link in links if link.is_displayed()]
 
 
 def _find_schedule_row(driver: webdriver.Chrome, schedule_number: str):

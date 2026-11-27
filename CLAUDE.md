@@ -277,7 +277,10 @@ Consulta (edição)    rótulos 'Data Programada' (2 inputs); Cliente = select2 
                      Programação'] > i.fa-pencil-square-o (confirmado via DOM; clicar no <a>).
                      Lixeira: span#...:roleExcluirProgramacao > a (onclick confirmDialog) >
                      button[title='Excluir Programação']; modal #formConProg:confirmDialog >
-                     a#formConProg:btnExcluir 'Excluir' (confirmados via DOM).
+                     a#formConProg:btnExcluir 'Excluir' (confirmados via DOM). Em produção a
+                     lixeira não era achada na linha (27/11): agora também por onclick
+                     'confirmDialog', id no próprio <a>, data-original-title, fa-trash e id com
+                     o prefixo da linha fora do <tr>; sem lixeira, o log imprime o HTML da linha.
                      Modal 'Alterar' e Pesquisa de Remessas da alteração não confirmados via DOM
 Alterar Compartim.   (confirmado via DOM) 'Placa: X' e Transportador em texto fixo; #comboPool;
                      carregado: td Ação > a[title='Excluir produto do compartimento'] (onclick
